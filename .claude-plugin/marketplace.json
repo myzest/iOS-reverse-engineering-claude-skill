@@ -1,0 +1,42 @@
+{
+  "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
+  "name": "ios-reverse-engineering",
+  "version": "1.0.0",
+  "description": "Extract, analyze, and reverse engineer iOS applications — IPA extraction, class-dump, API endpoint discovery, call flow tracing, security auditing, cloud credential scanning, binary reversing, SDK fingerprinting, and protection detection.",
+  "owner": {
+    "name": "zest"
+  },
+  "plugins": [
+    {
+      "name": "ios-reverse-engineering",
+      "description": "Extract and analyze iOS IPA, .app bundles, Mach-O binaries, .dylib, and .framework files using ipsw, otool, strings, radare2/rizin, and Ghidra headless. Reverse engineer iOS apps, extract HTTP API endpoints (URLSession, Alamofire, Moya, AFNetworking, GraphQL, WebSocket), trace call flows from ViewControllers to network layer, analyze security patterns (ATS, cert pinning, keychain, jailbreak detection), deep-scan for cloud credentials (Firebase, AWS, GCP, Azure, Stripe), perform LLM-assisted binary reversing analysis with Ghidra scripts, fingerprint embedded third-party SDKs with CVE checking, and detect anti-tampering protections (obfuscation, anti-debug, dylib injection prevention, integrity checks).",
+      "source": "./",
+      "category": "security",
+      "version": "1.0.0",
+      "license": "Unlicense",
+      "strict": false,
+      "keywords": [
+        "ios",
+        "reverse-engineering",
+        "security",
+        "ipa",
+        "mach-o",
+        "class-dump",
+        "api-extraction",
+        "binary-analysis",
+        "sdk-fingerprinting",
+        "credential-scanning",
+        "jailbreak-detection",
+        "anti-tampering",
+        "swift",
+        "objective-c"
+      ],
+      "commands": [
+        "./commands/extract-ipa.md"
+      ],
+      "skills": [
+        "./skills/ios-reverse-engineering"
+      ]
+    }
+  ]
+}
