@@ -24,13 +24,17 @@ Verify the directory exists and contains extracted app data (class-dump/, string
 
 ### Step 2: Run the protocol extraction script
 
-Run the full protocol analysis:
+Run the full protocol analysis with both the detailed report and a concise summary:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <analysis-dir> --report protocol-spec.md
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <analysis-dir> --report protocol-spec.md --summary protocol-summary.md
 ```
 
-This detects all protocol types and writes the AI-friendly specification incrementally to `protocol-spec.md`.
+This generates two files:
+- `protocol-spec.md` — Full AI-friendly protocol specification (written incrementally)
+- `protocol-summary.md` — Concise summary for AI prompt chaining (generated at end)
+
+**The summary (`protocol-summary.md`)** is the key deliverable — it's a condensed briefing document with Quick Facts, Endpoints table, Auth Flow, Key Types, and an SDK Implementation Checklist. Feed it directly to an AI to generate the SDK.
 
 For targeted analysis, use filters:
 - `--http` — HTTP/REST protocol only

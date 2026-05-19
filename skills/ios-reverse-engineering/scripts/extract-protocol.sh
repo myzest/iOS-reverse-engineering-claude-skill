@@ -26,11 +26,12 @@ Options:
   --auth            Focus on authentication state machine only
   --all             All protocol types (default)
   --report FILE     Write AI-friendly Markdown report to FILE (appended incrementally)
+  --summary FILE    Write a concise summary suitable for AI prompt chaining (generated at end)
   --context N       Show N lines of context around matches (default: 2)
   -h, --help        Show this help message
 
 Examples:
-  extract-protocol.sh MyApp-analysis --report protocol-spec.md
+  extract-protocol.sh MyApp-analysis --report protocol-spec.md --summary protocol-summary.md
   extract-protocol.sh MyApp-analysis --websocket --report ws-protocol.md
   extract-protocol.sh MyApp-analysis --http --auth --report api-spec.md
 EOF
@@ -50,6 +51,7 @@ DO_MQTT=false
 DO_AUTH=false
 DO_ALL=true
 REPORT_FILE=""
+SUMMARY_FILE=""
 CONTEXT_LINES=2
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --auth)      DO_AUTH=true;       DO_ALL=false; shift ;;
     --all)       DO_ALL=true; shift ;;
     --report)    REPORT_FILE="$2"; shift 2 ;;
+    --summary)   SUMMARY_FILE="$2"; shift 2 ;;
     --context)   CONTEXT_LINES="$2"; shift 2 ;;
     -h|--help)   usage ;;
     -*)          echo "Error: Unknown option $1" >&2; usage ;;
@@ -1132,4 +1135,322 @@ if [[ -n "$REPORT_FILE" ]]; then
   echo "  \"Write a Swift client SDK that implements this communication protocol.\""
 else
   echo -e "${YELLOW}Tip: Use --report protocol-spec.md to save the full AI-friendly specification.${NC}"
+fi
+
+# =====================================================================
+# SUMMARY GENERATION — concise doc for AI prompt chaining
+# =====================================================================
+
+if [[ -n "$SUMMARY_FILE" ]]; then
+  echo
+  echo -e "${BLUE}Generating concise summary for AI prompt chaining...${NC}"
+
+  # --- Helper: extract a section from the report ---
+  extract_report_section() {
+    local heading="$1"
+    if [[ -n "$REPORT_FILE" ]] && [[ -f "$REPORT_FILE" ]]; then
+      awk -v h="$heading" '
+        $0 ~ "^## "h"$" { found=1; next }
+        found && /^## / { exit }
+        found { print }
+      ' "$REPORT_FILE" 2>/dev/null || true
+    fi
+  }
+
+  # --- Determine transport ---
+  SUMMARY_TRANSPORT=""
+  if [[ "$http_count" -gt 0 ]]; then
+    SUMMARY_TRANSPORT="HTTPS (REST)"
+  fi
+  if [[ "$ws_count" -gt 0 ]] || [[ "$ws_lib_count" -gt 0 ]]; then
+    [[ -n "$SUMMARY_TRANSPORT" ]] && SUMMARY_TRANSPORT+=" + "
+    SUMMARY_TRANSPORT+="WebSocket (wss://)"
+  fi
+  if [[ "$grpc_count" -gt 0 ]]; then
+    [[ -n "$SUMMARY_TRANSPORT" ]] && SUMMARY_TRANSPORT+=" + "
+    SUMMARY_TRANSPORT+="gRPC"
+  fi
+  if [[ "$mqtt_count" -gt 0 ]]; then
+    [[ -n "$SUMMARY_TRANSPORT" ]] && SUMMARY_TRANSPORT+=" + "
+    SUMMARY_TRANSPORT+="MQTT"
+  fi
+  if [[ "$socket_count" -gt 3 ]]; then
+    [[ -n "$SUMMARY_TRANSPORT" ]] && SUMMARY_TRANSPORT+=" + "
+    SUMMARY_TRANSPORT+="Custom TCP Socket"
+  fi
+  [[ -z "$SUMMARY_TRANSPORT" ]] && SUMMARY_TRANSPORT="Unknown (binary may be stripped)"
+
+  # --- Determine serialization ---
+  SUMMARY_SERIALIZATION=""
+  if [[ "$json_count" -gt 0 ]]; then
+    SUMMARY_SERIALIZATION="JSON (Codable/JSONDecoder)"
+  fi
+  if [[ "$proto_count" -gt 0 ]]; then
+    [[ -n "$SUMMARY_SERIALIZATION" ]] && SUMMARY_SERIALIZATION+=" + "
+    SUMMARY_SERIALIZATION+="Protocol Buffers"
+  fi
+  if [[ "$msgpack_count" -gt 0 ]]; then
+    [[ -n "$SUMMARY_SERIALIZATION" ]] && SUMMARY_SERIALIZATION+=" + "
+    SUMMARY_SERIALIZATION+="MessagePack"
+  fi
+  [[ -z "$SUMMARY_SERIALIZATION" ]] && SUMMARY_SERIALIZATION="JSON (assumed)"
+
+  # --- Determine auth ---
+  SUMMARY_AUTH="None detected"
+  if [[ "$token_count" -gt 0 ]]; then
+    if echo "$token_patterns" | grep -qi 'bearer\|Bearer'; then
+      SUMMARY_AUTH="Bearer Token"
+    elif echo "$token_patterns" | grep -qi 'x-api-key\|api_key\|apikey'; then
+      SUMMARY_AUTH="API Key Header"
+    elif echo "$token_patterns" | grep -qi 'jwt\|JWT'; then
+      SUMMARY_AUTH="JWT Bearer Token"
+    else
+      SUMMARY_AUTH="Token-based (scheme unclear)"
+    fi
+  fi
+
+  SUMMARY_TOKEN_STORAGE="Unknown"
+  if [[ "$storage_count" -gt 0 ]]; then
+    if echo "$token_storage" | grep -qi 'Keychain\|SecItemAdd\|SAMKeychain\|KeychainWrapper\|Valet'; then
+      SUMMARY_TOKEN_STORAGE="Keychain (secure)"
+    elif echo "$token_storage" | grep -qi 'UserDefaults\|NSUserDefaults'; then
+      SUMMARY_TOKEN_STORAGE="UserDefaults (insecure)"
+    fi
+  fi
+
+  SUMMARY_HAS_REFRESH="No"
+  [[ "$refresh_count" -gt 0 ]] && SUMMARY_HAS_REFRESH="Yes"
+
+  # --- Extract base URLs ---
+  SUMMARY_BASE_URLS=""
+  if [[ "$http_count" -gt 0 ]]; then
+    SUMMARY_BASE_URLS=$(echo "$http_urls" | grep -oE 'https?://[^/"]+' | sort -u | head -5 | while read -r u; do echo "$u"; done || true)
+  fi
+
+  # --- Extract notable endpoints (from strings and class-dump) ---
+  SUMMARY_ENDPOINTS=""
+  if [[ "$http_count" -gt 0 ]]; then
+    # Try to extract method + path patterns
+    SUMMARY_ENDPOINTS=$(search_all '"/[a-z0-9_/-]+"' 2>/dev/null | \
+      grep -oE '"/[a-z0-9_/-]{3,}"' | \
+      grep -vE '/(usr|bin|var|etc|tmp|dev|System|Library|Applications|private)/' | \
+      sort -u | head -20 || true)
+
+    if [[ -z "$SUMMARY_ENDPOINTS" ]]; then
+      # Try extracting path components from URLs
+      SUMMARY_ENDPOINTS=$(echo "$http_urls" | grep -oE 'https?://[^"]+' | \
+        sed 's|https\?://[^/]*||' | sort -u | head -20 || true)
+    fi
+  fi
+
+  # --- Extract WebSocket events ---
+  SUMMARY_WS_EVENTS=""
+  if [[ "$ws_events_count" -gt 0 ]]; then
+    SUMMARY_WS_EVENTS=$(echo "$ws_events" | grep -oE '"[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)*"' | sort -u | head -20 || true)
+  fi
+
+  # --- Write the summary ---
+  {
+    echo "# Protocol Summary: ${APP_NAME}"
+    echo
+    echo "> Concise briefing for AI prompt chaining. Feed this document to an LLM with:"
+    echo "> \"Based on this protocol summary, generate a Swift client SDK.\""
+    echo
+    echo "---"
+    echo
+    echo "## Quick Facts"
+    echo
+    echo "| Property | Value |"
+    echo "|----------|-------|"
+    echo "| Transport | ${SUMMARY_TRANSPORT} |"
+    echo "| Serialization | ${SUMMARY_SERIALIZATION} |"
+    echo "| Auth Scheme | ${SUMMARY_AUTH} |"
+    echo "| Token Storage | ${SUMMARY_TOKEN_STORAGE} |"
+    echo "| Token Refresh | ${SUMMARY_HAS_REFRESH} |"
+
+    # Add base URLs
+    if [[ -n "$SUMMARY_BASE_URLS" ]]; then
+      echo "| Base URL(s) | $(echo "$SUMMARY_BASE_URLS" | head -3 | tr '\n' ' ' | sed 's/  */, /g' | sed 's/, $//') |"
+    fi
+
+    # Add WebSocket summary
+    if [[ "$ws_count" -gt 0 ]] || [[ "$ws_lib_count" -gt 0 ]]; then
+      echo "| WebSocket | Yes ($ws_count URLs, $ws_lib_count library refs) |"
+    fi
+
+    echo
+    echo "---"
+    echo
+    echo "## Endpoints / Messages"
+    echo
+
+    if [[ "$http_count" -gt 0 ]] && [[ -n "$SUMMARY_ENDPOINTS" ]]; then
+      echo "### HTTP Endpoints"
+      echo
+      echo "| Path | Notes |"
+      echo "|------|-------|"
+      echo "$SUMMARY_ENDPOINTS" | while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        path_clean=$(echo "$path" | tr -d '"')
+        echo "| \`${path_clean}\` | |"
+      done
+      echo
+    fi
+
+    if [[ -n "$SUMMARY_WS_EVENTS" ]]; then
+      echo "### WebSocket Event Types"
+      echo
+      echo "| Event | Direction | Notes |"
+      echo "|-------|-----------|-------|"
+      echo "$SUMMARY_WS_EVENTS" | while IFS= read -r evt; do
+        [[ -z "$evt" ]] && continue
+        evt_clean=$(echo "$evt" | tr -d '"')
+        echo "| \`${evt_clean}\` | | |"
+      done
+      echo
+    fi
+
+    if [[ "$grpc_count" -gt 0 ]]; then
+      echo "### gRPC Service Methods"
+      echo
+      echo '```'
+      echo "$grpc_service" | head -15
+      echo '```'
+      echo
+    fi
+
+    echo "---"
+    echo
+    echo "## Authentication Flow"
+    echo
+    echo '```'
+    if [[ "$token_count" -gt 0 ]]; then
+      echo "1. Login: POST /auth/login (or similar) with credentials"
+      echo "2. Receive: { access_token, refresh_token?, expires_in? }"
+      echo "3. Store: ${SUMMARY_TOKEN_STORAGE}"
+      echo "4. Attach: Authorization: ${SUMMARY_AUTH} header on all requests"
+      if [[ "$SUMMARY_HAS_REFRESH" == "Yes" ]]; then
+        echo "5. Refresh: On 401, POST /auth/refresh (or similar) with refresh_token"
+        echo "6. Retry: Original request with new access_token"
+        echo "7. Logout: Clear stored tokens → UNAUTHENTICATED"
+      fi
+    else
+      echo "No authentication detected (or stripped binary)"
+    fi
+    echo '```'
+    echo
+
+    echo "---"
+    echo
+    echo "## Key Data Types"
+    echo
+    echo "Based on detected patterns, the following types likely need to be defined:"
+    echo
+
+    if [[ "$token_count" -gt 0 ]]; then
+      echo "- **LoginRequest**: credentials payload (email, password, phone, etc.)"
+      echo "- **AuthToken**: access_token, refresh_token?, expires_in?, token_type"
+    fi
+
+    if [[ "$http_count" -gt 0 ]]; then
+      echo "- **APIError**: error code, message, details (from error response body)"
+      echo "- **Pagination<T>**: page/offset/cursor + items array"
+    fi
+
+    if [[ "$proto_count" -gt 0 ]]; then
+      echo "- **Protobuf Messages**: Recompile .proto files to generate Swift types"
+      echo
+      echo "Proto files referenced:"
+      echo "$proto_files" | while IFS= read -r pf; do
+        [[ -n "$pf" ]] && echo "  - ${pf}"
+      done
+    fi
+
+    echo
+    echo "---"
+    echo
+    echo "## SDK Implementation Checklist"
+    echo
+    echo "Use this checklist to guide the SDK implementation:"
+    echo
+
+    echo "### Transport Layer"
+    echo "- [ ] Configure URLSession with appropriate timeout and caching"
+    if [[ "$ws_count" -gt 0 ]] || [[ "$ws_lib_count" -gt 0 ]]; then
+      echo "- [ ] Set up WebSocket connection with URLSessionWebSocketTask or Starscream"
+    fi
+    if [[ "$socket_count" -gt 3 ]]; then
+      echo "- [ ] Implement custom socket connection with Network.framework (NWConnection)"
+    fi
+    echo
+
+    echo "### Serialization"
+    if [[ "$json_count" -gt 0 ]]; then
+      echo "- [ ] Define Codable request/response types matching the API schema"
+      echo "- [ ] Configure JSONEncoder/JSONDecoder with appropriate key strategies"
+    fi
+    if [[ "$proto_count" -gt 0 ]]; then
+      echo "- [ ] Compile .proto files with protoc and integrate generated Swift types"
+    fi
+    echo
+
+    echo "### Authentication"
+    if [[ "$token_count" -gt 0 ]]; then
+      echo "- [ ] Implement login function taking credentials, returning AuthToken"
+      echo "- [ ] Store tokens in Keychain (SecItemAdd/SecItemCopyMatching)"
+      echo "- [ ] Implement RequestInterceptor/Adapter to inject Authorization header"
+      if [[ "$SUMMARY_HAS_REFRESH" == "Yes" ]]; then
+        echo "- [ ] Implement token refresh interceptor (serialized, only one refresh at a time)"
+        echo "- [ ] Queue pending requests during refresh, then retry with new token"
+      fi
+      echo "- [ ] Implement logout (clear Keychain, cancel pending requests)"
+    fi
+    echo
+
+    echo "### Error Handling"
+    echo "- [ ] Define typed ClientError enum (network, http, server, auth, decoding)"
+    echo "- [ ] Parse server error response body for error codes/messages"
+    echo "- [ ] Retry on 5xx and network errors with exponential backoff"
+    echo "- [ ] Do NOT retry on 4xx (except 429 rate limit)"
+    echo
+
+    echo "### Thread Safety"
+    echo "- [ ] Use actor for token store to serialize refresh"
+    echo "- [ ] Callbacks on a dedicated serial queue, not main"
+    echo "- [ ] @MainActor only for UI-bound published state"
+    echo
+
+    if [[ "$ws_count" -gt 0 ]] || [[ "$socket_count" -gt 3 ]]; then
+      echo "### Connection Lifecycle"
+      echo "- [ ] Implement exponential backoff reconnection (1s → 2s → 4s → ... → 60s max)"
+      echo "- [ ] Monitor NWPathMonitor for reachability changes"
+      echo "- [ ] Re-authenticate after successful reconnect"
+      echo
+    fi
+
+    echo "### API Style"
+    echo "- [ ] Use Swift async/await (modern, no callback nesting)"
+    echo "- [ ] Return Result<T, ClientError> or throw typed errors"
+    echo "- [ ] Public API: \`AppClient\` class with configuration struct"
+    echo
+
+    echo "---"
+    echo
+    echo "## LLM Prompt Template"
+    echo
+    echo "Copy this entire document and append:"
+    echo
+    echo "> Based on the protocol summary above, write a complete Swift client SDK."
+    echo "> Use async/await, URLSession, and follow the SDK Implementation Checklist."
+    echo "> Include: configuration, auth interceptor with token refresh, error handling, and retry logic."
+    echo "> Generate all necessary Codable types, the public API class, and usage examples."
+    echo
+    echo "---"
+    echo "_Summary generated by ios-reverse-engineering-skill_"
+  } > "$SUMMARY_FILE"
+
+  echo -e "${GREEN}Summary saved to: $SUMMARY_FILE${NC}"
+  echo
+  echo "To generate SDK code, feed the summary to an AI with:"
+  echo "  \"Based on this protocol summary, write a complete Swift client SDK.\""
 fi

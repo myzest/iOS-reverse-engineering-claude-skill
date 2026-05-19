@@ -481,8 +481,12 @@ Extract and document the app's underlying communication protocol — the wire fo
 **Action**: Run the protocol extraction script:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --report protocol-spec.md
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --report protocol-spec.md --summary protocol-summary.md
 ```
+
+This generates two complementary documents:
+- `protocol-spec.md` — Full AI-friendly protocol specification (written incrementally as analysis progresses)
+- `protocol-summary.md` — Concise briefing for AI prompt chaining: Quick Facts, Endpoints table, Auth Flow, Key Types, and an SDK Implementation Checklist
 
 This script detects and documents:
 - **Transport layer** — HTTP/HTTPS, WebSocket, gRPC, custom TCP/UDP sockets, MQTT
@@ -516,8 +520,8 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protoc
 # Authentication flow only
 bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --auth --report auth-flow.md
 
-# HTTP + Auth (most common need)
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --auth --report api-spec.md
+# HTTP + Auth (most common need) with summary
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --auth --report api-spec.md --summary api-summary.md
 ```
 
 **LLM Analysis**: After the protocol extraction completes, read the generated report and enhance it:
