@@ -105,6 +105,16 @@ fi
 PROTOCOL_TYPES_FOUND=()
 SECTION_NUM=0
 
+# Robust line counter — avoids pipefail issues with grep -c on empty input
+count_lines() {
+  local input="$1"
+  if [[ -z "$input" ]]; then
+    echo "0"
+  else
+    echo "$input" | grep -c . 2>/dev/null || echo "0"
+  fi
+}
+
 # Search across class-dump headers and strings
 search_all() {
   local pattern="$1"
@@ -257,7 +267,7 @@ TRANSPORT_CONTENT=""
 
 # --- HTTP/HTTPS ---
 http_urls=$(search_strings '"https\?://[^"]*"' || true)
-http_count=$(echo "$http_urls" | grep -c '.' 2>/dev/null || echo "0")
+http_count=$(count_lines "$http_urls")
 
 if [[ "$http_count" -gt 0 ]]; then
   print_finding "TRANSPORT" "HTTP/HTTPS detected — $http_count URLs found"
@@ -288,10 +298,10 @@ fi
 
 # --- WebSocket ---
 ws_urls=$(search_all '"wss\?://[^"]*"' || true)
-ws_count=$(echo "$ws_urls" | grep -c '.' 2>/dev/null || echo "0")
+ws_count=$(count_lines "$ws_urls")
 
 ws_libs=$(search_all 'URLSessionWebSocketTask\|Starscream\|SocketRocket\|NWProtocolWebSocket\|SocketIOClient\|SocketManager' || true)
-ws_lib_count=$(echo "$ws_libs" | grep -c '.' 2>/dev/null || echo "0")
+ws_lib_count=$(count_lines "$ws_libs")
 
 if [[ "$ws_count" -gt 0 ]] || [[ "$ws_lib_count" -gt 0 ]]; then
   print_finding "TRANSPORT" "WebSocket detected — $ws_count WS URLs, $ws_lib_count library references"
@@ -312,7 +322,7 @@ fi
 
 # --- Custom TCP/UDP Socket ---
 socket_refs=$(search_all 'socket\(\)\|connect\(\)\|CFStreamCreate\|CFStreamCreatePair\|NWConnection\|nw_connection\|getaddrinfo' || true)
-socket_count=$(echo "$socket_refs" | grep -c '.' 2>/dev/null || echo "0")
+socket_count=$(count_lines "$socket_refs")
 
 if [[ "$socket_count" -gt 3 ]]; then
   print_finding "TRANSPORT" "Custom TCP/UDP socket usage detected — $socket_count references"
@@ -334,7 +344,7 @@ fi
 
 # --- gRPC ---
 grpc_refs=$(search_all 'GRPCChannel\|ClientConnection\|GRPCManagedChannel\|CallOptions\|makeUnaryCall\|makeServerStreamingCall\|makeBidirectionalStreamingCall\|SwiftGRPC\|grpc-swift\|grpc\.swift' || true)
-grpc_count=$(echo "$grpc_refs" | grep -c '.' 2>/dev/null || echo "0")
+grpc_count=$(count_lines "$grpc_refs")
 
 if [[ "$grpc_count" -gt 0 ]]; then
   print_finding "TRANSPORT" "gRPC detected — $grpc_count references"
@@ -346,7 +356,7 @@ fi
 
 # --- MQTT ---
 mqtt_refs=$(search_all 'MQTT\|CocoaMQTT\|MQTTClient\|MQTTSession\|MQTTAsync\|mqtt://\|mqtts://' || true)
-mqtt_count=$(echo "$mqtt_refs" | grep -c '.' 2>/dev/null || echo "0")
+mqtt_count=$(count_lines "$mqtt_refs")
 
 if [[ "$mqtt_count" -gt 0 ]]; then
   print_finding "TRANSPORT" "MQTT detected — $mqtt_count references"
@@ -386,7 +396,7 @@ SERIAL_CONTENT=""
 
 # --- JSON ---
 json_refs=$(search_all 'JSONDecoder\|JSONEncoder\|JSONSerialization\|SwiftyJSON\|ObjectMapper\|HandyJSON\|Codable.*JSON\|\.responseJSON\|responseDecodable\|\.decode(' || true)
-json_count=$(echo "$json_refs" | grep -c '.' 2>/dev/null || echo "0")
+json_count=$(count_lines "$json_refs")
 
 if [[ "$json_count" -gt 0 ]]; then
   print_finding "FORMAT" "JSON — $json_count references to JSON parsing/coding"
@@ -406,7 +416,7 @@ fi
 
 # --- Protocol Buffers ---
 protobuf_refs=$(search_all 'GPBMessage\|GPBString\|GPBInt32\|GPBBool\|\.proto\|protobuf\|SwiftProtobuf\|protoc\|GPBCodedInputStream\|GPBCodedOutputStream\|GPBWireFormat\|\.pb\.\|SerializedSize\|mergeFrom\|parseFrom\|proto3\|proto2' || true)
-proto_count=$(echo "$protobuf_refs" | grep -c '.' 2>/dev/null || echo "0")
+proto_count=$(count_lines "$protobuf_refs")
 
 if [[ "$proto_count" -gt 0 ]]; then
   print_finding "FORMAT" "Protocol Buffers — $proto_count references"
@@ -438,7 +448,7 @@ fi
 
 # --- MessagePack ---
 msgpack_refs=$(search_all 'MessagePack\|msgpack\|MPMessagePack\|MPEncoder\|MPDecoder\|MessagePackEncoder\|MessagePackDecoder' || true)
-msgpack_count=$(echo "$msgpack_refs" | grep -c '.' 2>/dev/null || echo "0")
+msgpack_count=$(count_lines "$msgpack_refs")
 
 if [[ "$msgpack_count" -gt 0 ]]; then
   print_finding "FORMAT" "MessagePack — $msgpack_count references"
@@ -448,7 +458,7 @@ fi
 
 # --- Custom Binary ---
 binary_framing=$(search_all 'memcpy\|CFSwapInt16\|CFSwapInt32\|CFSwapInt64\|htonl\|htons\|ntohl\|ntohs\|encodeBytes\|encodeInt\|encodeString\|Data\(bytes:\|withUnsafeBytes' || true)
-binary_count=$(echo "$binary_framing" | grep -c '.' 2>/dev/null || echo "0")
+binary_count=$(count_lines "$binary_framing")
 
 # Check for byte-level manipulation combined with send/recv
 if [[ "$binary_count" -gt 5 ]] && [[ "$socket_count" -gt 2 ]]; then
@@ -467,7 +477,7 @@ framing_patterns=""
 
 # Length-prefix framing
 len_prefix=$(search_all 'readInt32\|readUInt32\|readInt16\|writeInt32\|writeUInt32\|varint\|readVarint\|writeVarint\|bodyLength\|messageLength\|packetSize\|payloadSize\|dataLength\|contentLength' || true)
-len_prefix_count=$(echo "$len_prefix" | grep -c '.' 2>/dev/null || echo "0")
+len_prefix_count=$(count_lines "$len_prefix")
 
 if [[ "$len_prefix_count" -gt 0 ]]; then
   framing_patterns+="- **Length-prefixed framing**: Messages prefixed with size field (e.g., 4-byte big-endian length). $len_prefix_count references."$'\n'
@@ -475,7 +485,7 @@ fi
 
 # Delimiter-based framing
 delimiter_refs=$(search_strings '\\\\r\\\\n\|\\\\n\|\\\\0\|<EOF>\|--boundary' | head -10 || true)
-delim_count=$(echo "$delimiter_refs" | grep -c '.' 2>/dev/null || echo "0")
+delim_count=$(count_lines "$delimiter_refs")
 
 if [[ "$delim_count" -gt 0 ]]; then
   framing_patterns+="- **Delimiter-based framing**: Messages terminated by delimiter characters."$'\n'
@@ -484,7 +494,7 @@ fi
 
 # Fixed-size messages
 fixed_size=$(search_all 'sizeof\(\)|kMessageSize\|kPacketSize\|kFrameSize\|MSG_SIZE\|PACKET_SIZE\|BUFFER_SIZE' | head -10 || true)
-fixed_count=$(echo "$fixed_size" | grep -c '.' 2>/dev/null || echo "0")
+fixed_count=$(count_lines "$fixed_size")
 
 if [[ "$fixed_count" -gt 0 ]]; then
   framing_patterns+="- **Fixed-size messages**: Constant message/packet sizes may indicate fixed-length protocol."$'\n'
@@ -518,7 +528,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Base URLs ---
   base_urls=$(search_all 'baseURL\|base_url\|apiURL\|api_url\|serverURL\|server_url\|ENDPOINT\|API_BASE\|kAPI\|kBase\|BASE_URL\|API_URL\|SERVER_URL' || true)
-  base_count=$(echo "$base_urls" | grep -c '.' 2>/dev/null || echo "0")
+  base_count=$(count_lines "$base_urls")
 
   if [[ "$base_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Base URL Configuration"$'\n\n'
@@ -528,7 +538,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- API Path Patterns ---
   api_paths=$(search_all '"/api/[^"]*"\|"/v[0-9]+/[^"]*"\|"[a-z]+/[a-z]+.*path\|path.*=.*"/' || true)
-  path_count=$(echo "$api_paths" | grep -c '.' 2>/dev/null || echo "0")
+  path_count=$(count_lines "$api_paths")
 
   if [[ "$path_count" -gt 0 ]]; then
     HTTP_CONTENT+="### API Path Patterns"$'\n\n'
@@ -537,7 +547,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- HTTP Methods ---
   http_methods=$(search_all 'httpMethod\s*=\s*"GET"\|httpMethod\s*=\s*"POST"\|httpMethod\s*=\s*"PUT"\|httpMethod\s*=\s*"DELETE"\|httpMethod\s*=\s*"PATCH"\|\.get\|\.post\|\.put\|\.delete\|\.patch\|HTTPMethod' || true)
-  method_count=$(echo "$http_methods" | grep -c '.' 2>/dev/null || echo "0")
+  method_count=$(count_lines "$http_methods")
 
   if [[ "$method_count" -gt 0 ]]; then
     HTTP_CONTENT+="### HTTP Methods Used"$'\n\n'
@@ -546,7 +556,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Request Headers ---
   req_headers=$(search_all 'setValue.*forHTTPHeaderField\|addValue.*forHTTPHeaderField\|\.headers\s*=\s*\["\|allHTTPHeaderFields\|Authorization\|Content-Type.*application\|Accept.*application\|x-api-key\|User-Agent\|X-' || true)
-  header_count=$(echo "$req_headers" | grep -c '.' 2>/dev/null || echo "0")
+  header_count=$(count_lines "$req_headers")
 
   if [[ "$header_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Request Headers"$'\n\n'
@@ -563,7 +573,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Response Handling ---
   resp_patterns=$(search_all 'statusCode\|HTTPURLResponse\|didReceiveResponse\|responseDecodable\|responseJSON\|\.response\s*\{' || true)
-  resp_count=$(echo "$resp_patterns" | grep -c '.' 2>/dev/null || echo "0")
+  resp_count=$(count_lines "$resp_patterns")
 
   if [[ "$resp_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Response Handling"$'\n\n'
@@ -573,7 +583,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Error Response Format ---
   error_patterns=$(search_all 'error.*code\|errorCode\|error_code\|message.*error\|error.*message\|\.failure\|\.serverError\|\.clientError\|unauthorized\|forbidden\|notFound\|internalServerError' || true)
-  error_count=$(echo "$error_patterns" | grep -c '.' 2>/dev/null || echo "0")
+  error_count=$(count_lines "$error_patterns")
 
   if [[ "$error_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Error Response Handling"$'\n\n'
@@ -583,7 +593,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Pagination ---
   pagination=$(search_all 'page\|perPage\|pageSize\|limit\|offset\|cursor\|nextPage\|hasMore\|next_cursor\|totalPages\|total_count' || true)
-  page_count=$(echo "$pagination" | grep -c '.' 2>/dev/null || echo "0")
+  page_count=$(count_lines "$pagination")
 
   if [[ "$page_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Pagination"$'\n\n'
@@ -600,7 +610,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_HTTP" == true ]]; then
 
   # --- Rate Limiting ---
   rate_limit=$(search_all 'rateLimit\|rate_limit\|retryAfter\|retry_after\|x-ratelimit\|429\|tooManyRequests\|throttle' || true)
-  rl_count=$(echo "$rate_limit" | grep -c '.' 2>/dev/null || echo "0")
+  rl_count=$(count_lines "$rate_limit")
 
   if [[ "$rl_count" -gt 0 ]]; then
     HTTP_CONTENT+="### Rate Limiting"$'\n\n'
@@ -629,7 +639,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_WEBSOCKET" == true ]]; then
 
   # --- Connection Details ---
   ws_connect=$(search_all 'webSocketTask\|\.connect()\|WebSocket\(url:\|initWithURL' || true)
-  ws_connect_count=$(echo "$ws_connect" | grep -c '.' 2>/dev/null || echo "0")
+  ws_connect_count=$(count_lines "$ws_connect")
 
   if [[ "$ws_connect_count" -gt 0 ]]; then
     WS_CONTENT+="### Connection Establishment"$'\n\n'
@@ -639,7 +649,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_WEBSOCKET" == true ]]; then
 
   # --- Message Sending ---
   ws_send=$(search_all '\.send\(.*Message\|\.write\(string:\|\.write\(data:\|\.sendPing\|\.sendPong\|\.receive\s*\{' || true)
-  ws_send_count=$(echo "$ws_send" | grep -c '.' 2>/dev/null || echo "0")
+  ws_send_count=$(count_lines "$ws_send")
 
   if [[ "$ws_send_count" -gt 0 ]]; then
     WS_CONTENT+="### Message Send/Receive"$'\n\n'
@@ -649,7 +659,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_WEBSOCKET" == true ]]; then
 
   # --- Message Routing (event types) ---
   ws_events=$(search_all '\.emit\("*\|\.on\("*\|\.on\(event:\|event.*=.*"\|type.*=.*"\|action.*=.*"\|messageType\|msg_type\|\.case\s*=\s*"' || true)
-  ws_events_count=$(echo "$ws_events" | grep -c '.' 2>/dev/null || echo "0")
+  ws_events_count=$(count_lines "$ws_events")
 
   if [[ "$ws_events_count" -gt 0 ]]; then
     WS_CONTENT+="### Message Routing / Event Types"$'\n\n'
@@ -669,7 +679,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_WEBSOCKET" == true ]]; then
 
   # --- Heartbeat / Ping-Pong ---
   ws_ping=$(search_all 'ping\|pong\|heartbeat\|heart_beat\|keepAlive\|keep_alive\|sendPing\|sendPong\|pingInterval\|pingSender' || true)
-  ws_ping_count=$(echo "$ws_ping" | grep -c '.' 2>/dev/null || echo "0")
+  ws_ping_count=$(count_lines "$ws_ping")
 
   if [[ "$ws_ping_count" -gt 0 ]]; then
     WS_CONTENT+="### Keepalive / Heartbeat"$'\n\n'
@@ -679,7 +689,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_WEBSOCKET" == true ]]; then
 
   # --- Reconnection ---
   ws_reconnect=$(search_all 'reconnect\|reconnectInterval\|autoReconnect\|shouldReconnect\|connectionLost\|didDisconnect\|onDisconnect' || true)
-  ws_reconn_count=$(echo "$ws_reconnect" | grep -c '.' 2>/dev/null || echo "0")
+  ws_reconn_count=$(count_lines "$ws_reconnect")
 
   if [[ "$ws_reconn_count" -gt 0 ]]; then
     WS_CONTENT+="### Reconnection Strategy"$'\n\n'
@@ -708,7 +718,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_GRPC" == true ]]; then
 
   # --- Service Definitions ---
   grpc_service=$(search_all 'ServiceClient\|ServiceServer\|\.async\.\|\.rx\.\|makeUnaryCall\|makeServerStreamingCall\|makeClientStreamingCall\|makeBidirectionalStreamingCall\|GRPCAsync\|GRPCClient' || true)
-  grpc_svc_count=$(echo "$grpc_service" | grep -c '.' 2>/dev/null || echo "0")
+  grpc_svc_count=$(count_lines "$grpc_service")
 
   if [[ "$grpc_svc_count" -gt 0 ]]; then
     GRPC_CONTENT+="### gRPC Service Methods"$'\n\n'
@@ -718,7 +728,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_GRPC" == true ]]; then
 
   # --- Proto Messages ---
   proto_msgs=$(search_headers '@interface GPB\|@interface.*_PB\|PB_OBJECT_CLASS\|Message.*:.*NSObject\|Message.*:.*GPBMessage' || true)
-  proto_msg_count=$(echo "$proto_msgs" | grep -c '.' 2>/dev/null || echo "0")
+  proto_msg_count=$(count_lines "$proto_msgs")
 
   if [[ "$proto_msg_count" -gt 0 ]]; then
     GRPC_CONTENT+="### Protobuf Message Definitions"$'\n\n'
@@ -735,7 +745,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_GRPC" == true ]]; then
 
   # --- Channel Configuration ---
   grpc_channel=$(search_all 'GRPCChannel\|GRPCHost\|host.*port\|grpcPort\|insecureChannel\|secureChannel\|GRPCManager\|GRPCService' || true)
-  grpc_chan_count=$(echo "$grpc_channel" | grep -c '.' 2>/dev/null || echo "0")
+  grpc_chan_count=$(count_lines "$grpc_channel")
 
   if [[ "$grpc_chan_count" -gt 0 ]]; then
     GRPC_CONTENT+="### Channel Configuration"$'\n\n'
@@ -764,7 +774,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_SOCKET" == true ]]; then
 
   # --- Connection Parameters ---
   sock_conn=$(search_all 'CFStreamCreatePairWithSocketToHost\|NWEndpoint\|nw_endpoint_create_host\|connect.*port\|getaddrinfo.*port\|sockaddr_in' || true)
-  sock_conn_count=$(echo "$sock_conn" | grep -c '.' 2>/dev/null || echo "0")
+  sock_conn_count=$(count_lines "$sock_conn")
 
   if [[ "$sock_conn_count" -gt 0 ]]; then
     SOCK_CONTENT+="### Connection Parameters"$'\n\n'
@@ -774,7 +784,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_SOCKET" == true ]]; then
 
   # --- Send/Recv Buffer Analysis ---
   sock_io=$(search_all 'send\(\|recv\(\|write\(\|read\(\|CFWriteStreamWrite\|CFReadStreamRead\|nw_connection_send\|nw_connection_receive' || true)
-  sock_io_count=$(echo "$sock_io" | grep -c '.' 2>/dev/null || echo "0")
+  sock_io_count=$(count_lines "$sock_io")
 
   if [[ "$sock_io_count" -gt 0 ]]; then
     SOCK_CONTENT+="### Socket I/O Operations"$'\n\n'
@@ -791,7 +801,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_SOCKET" == true ]]; then
 
   # --- TLS/SSL on Socket ---
   sock_tls=$(search_all 'SSLSetEnabledCiphers\|SSLContext\|SecTrust\|kCFStreamPropertySocketSecurityLevel\|kCFStreamSSL\|tls_ciphersuite\|startTLS' || true)
-  sock_tls_count=$(echo "$sock_tls" | grep -c '.' 2>/dev/null || echo "0")
+  sock_tls_count=$(count_lines "$sock_tls")
 
   if [[ "$sock_tls_count" -gt 0 ]]; then
     SOCK_CONTENT+="### TLS/SSL Configuration"$'\n\n'
@@ -801,7 +811,7 @@ if [[ "$DO_ALL" == true ]] || [[ "$DO_SOCKET" == true ]]; then
 
   # --- Framing Details ---
   sock_frame=$(search_all 'messageLength\|packetLength\|msgLength\|bodyLength\|readHeader\|parseHeader\|writeHeader\|messageType\|msgType\|packetType\|command\|CMD_' || true)
-  sock_frame_count=$(echo "$sock_frame" | grep -c '.' 2>/dev/null || echo "0")
+  sock_frame_count=$(count_lines "$sock_frame")
 
   if [[ "$sock_frame_count" -gt 0 ]]; then
     SOCK_CONTENT+="### Message Framing"$'\n\n'
@@ -832,23 +842,23 @@ AUTH_CONTENT=""
 
 # --- Login Request ---
 login_patterns=$(search_all 'login\|signIn\|sign_in\|authenticate\|logon\|LoginRequest\|SignInRequest\|AuthRequest' || true)
-login_count=$(echo "$login_patterns" | grep -c '.' 2>/dev/null || echo "0")
+login_count=$(count_lines "$login_patterns")
 
 # --- Token Handling ---
 token_patterns=$(search_all 'accessToken\|access_token\|refreshToken\|refresh_token\|idToken\|id_token\|bearer\|Bearer\|JWT\|oauth\|OAuth\|token.*=.*"\|setToken\|saveToken\|storeToken' || true)
-token_count=$(echo "$token_patterns" | grep -c '.' 2>/dev/null || echo "0")
+token_count=$(count_lines "$token_patterns")
 
 # --- Token Storage ---
 token_storage=$(search_all 'KeychainWrapper\|KeychainAccess\|SecItemAdd.*token\|SAMKeychain\|UserDefaults.*token\|UserDefaults.*Token\|\.set\(.*token\|token.*UserDefaults\|NSUbiquitousKeyValueStore' || true)
-storage_count=$(echo "$token_storage" | grep -c '.' 2>/dev/null || echo "0")
+storage_count=$(count_lines "$token_storage")
 
 # --- Token Refresh ---
 refresh_patterns=$(search_all 'refreshToken\|refresh_token\|refreshAuth\|renewToken\|tokenExpired\|token.*expir\|401\|unauthorized\|didExpire\|isExpired' || true)
-refresh_count=$(echo "$refresh_patterns" | grep -c '.' 2>/dev/null || echo "0")
+refresh_count=$(count_lines "$refresh_patterns")
 
 # --- Auth Headers ---
 auth_headers=$(search_all 'Authorization\|authorization\|Bearer\|bearer\|x-api-key\|x-auth\|x-access-token\|Authentication' || true)
-auth_header_count=$(echo "$auth_headers" | grep -c '.' 2>/dev/null || echo "0")
+auth_header_count=$(count_lines "$auth_headers")
 
 # --- Build State Machine ---
 AUTH_CONTENT+="### Authentication Flow"$'\n\n'
@@ -955,15 +965,15 @@ LIFECYCLE_CONTENT=""
 
 # --- Connection Lifecycle ---
 lifecycle_patterns=$(search_all 'didConnect\|onConnect\|didDisconnect\|onDisconnect\|connectionLost\|networkReachable\|reachabilityChanged\|didBecomeActive\|willResignActive\|didEnterBackground\|willEnterForeground' || true)
-lifecycle_count=$(echo "$lifecycle_patterns" | grep -c '.' 2>/dev/null || echo "0")
+lifecycle_count=$(count_lines "$lifecycle_patterns")
 
 # --- Retry / Backoff ---
 retry_patterns=$(search_all 'retry\|retryCount\|maxRetry\|retryDelay\|backoff\|exponentialBackoff\|jitter\|retryAfter' || true)
-retry_count=$(echo "$retry_patterns" | grep -c '.' 2>/dev/null || echo "0")
+retry_count=$(count_lines "$retry_patterns")
 
 # --- Timeouts ---
 timeout_patterns=$(search_all 'timeout\|timeoutInterval\|requestTimeout\|connectTimeout\|socketTimeout\|TimeoutInterval' || true)
-timeout_count=$(echo "$timeout_patterns" | grep -c '.' 2>/dev/null || echo "0")
+timeout_count=$(count_lines "$timeout_patterns")
 
 LIFECYCLE_CONTENT+="### Connection Lifecycle"$'\n\n'
 
@@ -1053,8 +1063,8 @@ SDK_CONTENT+=$'\n'
 SDK_CONTENT+="### Authentication"$'\n\n'
 
 if [[ "$token_count" -gt 0 ]]; then
-  SDK_CONTENT+="- Implement \`AuthInterceptor\` protocol (or \`RequestAdapter\`/`RequestRetrier\` for Alamofire)"$'\n'
-  SDK_CONTENT+="- Store tokens in Keychain (use \`SecItemAdd\`/`SecItemCopyMatching\`)"$'\n'
+  SDK_CONTENT+="- Implement \`AuthInterceptor\` protocol (or \`RequestAdapter\`/\`RequestRetrier\` for Alamofire)"$'\n'
+  SDK_CONTENT+="- Store tokens in Keychain (use \`SecItemAdd\`/\`SecItemCopyMatching\`)"$'\n'
   SDK_CONTENT+="- Auto-refresh tokens on 401 response using refresh token"$'\n'
   SDK_CONTENT+="- Queue pending requests during token refresh to avoid race conditions"$'\n'
 fi
