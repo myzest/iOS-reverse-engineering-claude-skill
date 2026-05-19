@@ -477,9 +477,9 @@ If Theos is NOT installed, tell the user the project is ready and provide:
 - The command to install Theos: `bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"`
 - The command to build: `cd <tweak-dir> && make package`
 
-### Step 7: Document the Hook in a README
+### Step 7: Document the Hook in a README (Chinese)
 
-Generate a `README.md` inside the tweak directory:
+Generate a `README.md` inside the tweak directory. **All documentation must be written in Chinese.**
 
 ```markdown
 # <TweakName>
