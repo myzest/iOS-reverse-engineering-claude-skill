@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash, Read, Glob, Grep, Write, Edit
-description: Extract and document an iOS app's communication protocol as an AI-friendly specification
+description: Discover networking files and guide AI-driven protocol analysis
 user-invocable: true
 argument-hint: <path to analysis directory>
 argument: path to analysis output directory (from /extract-ipa)
@@ -8,11 +8,13 @@ argument: path to analysis output directory (from /extract-ipa)
 
 # /extract-protocol
 
-Extract and document an iOS app's communication protocol layer — wire format, message framing, serialization, authentication state machine, and session lifecycle. Produces an AI-friendly markdown specification that can be used to generate client SDK wrapper code.
+Discover networking and protocol-related files in an extracted iOS app, then guide the AI through reading those files to produce a complete protocol specification.
+
+**Architecture**: Script discovers files → AI reads files → AI writes protocol spec
 
 ## Instructions
 
-You are starting the Communication Protocol Extraction workflow. Follow these steps:
+You are starting the Communication Protocol Discovery & Analysis workflow. Follow these steps:
 
 ### Step 1: Get the analysis directory
 
@@ -22,70 +24,81 @@ If no argument was given, ask the user for the path to the analysis directory.
 
 Verify the directory exists and contains extracted app data (class-dump/, strings-raw.txt, etc.).
 
-### Step 2: Run the protocol extraction script
-
-Run the full protocol analysis with both the detailed report and a concise summary:
+### Step 2: Run the file discovery script
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <analysis-dir> --report protocol-spec.md --summary protocol-summary.md
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <analysis-dir>
 ```
 
-This generates two files:
-- `protocol-spec.md` — Full AI-friendly protocol specification (written incrementally)
-- `protocol-summary.md` — Concise summary for AI prompt chaining (generated at end)
+This discovers and categorizes networking-related files. It generates:
 
-**The summary (`protocol-summary.md`)** is the key deliverable — it's a condensed briefing document with Quick Facts, Endpoints table, Auth Flow, Key Types, and an SDK Implementation Checklist. Feed it directly to an AI to generate the SDK.
+- **`protocol-analysis/protocol-guide.md`** — Structured reading plan for AI (the main deliverable)
+- **`protocol-analysis/file-index.md`** — Complete categorized file list
+- **`protocol-analysis/relevant-strings.txt`** — Protocol-related strings from binary
 
-For targeted analysis, use filters:
-- `--http` — HTTP/REST protocol only
-- `--websocket` — WebSocket protocol only
-- `--grpc` — gRPC/Protobuf only
-- `--socket` — Custom TCP/UDP socket only
-- `--mqtt` — MQTT only
-- `--auth` — Authentication state machine only
-- `--http --auth` — HTTP + Auth (most common)
+### Step 3: Read and analyze the discovered files
 
-### Step 3: Review and enhance the protocol specification
+The script only finds files — **you (the AI) must read them** to understand the protocol.
 
-After the script completes, read the generated `protocol-spec.md` and enhance it:
+Follow the reading guide in `protocol-guide.md`:
 
-1. **Complete the Message Catalog** — For each discovered message type, read the relevant class-dump headers and strings to extract the full schema. Add example payloads extracted from the binary strings.
+1. **Read `relevant-strings.txt` first** — Find base URLs, endpoints, auth patterns
+2. **Read Priority 1 files** (HTTP API Client, Auth) — Understand the core networking and auth
+3. **Read Priority 2 files** (Service Layer, WebSocket) — Understand real-time and business logic
+4. **Read Priority 3 files** (Socket, gRPC, MQTT, GraphQL) — If present, understand specialized protocols
+5. **Read Priority 4 files** (Serialization) — Understand data models
 
-2. **Trace the Auth State Machine** — Read the class-dump headers for auth-related classes (login, token, refresh). Trace the exact flow:
-   - What fields does the login request contain?
-   - What fields does the login response return?
-   - Where are tokens stored (Keychain, UserDefaults)?
-   - What triggers a token refresh?
-   - How is the auth header constructed?
+For each file you read:
+- Read the class-dump header to understand the interface
+- Cross-reference findings with `relevant-strings.txt` for real values
+- Note what protocol it implements, what role it plays, key methods and types
 
-3. **Reconstruct Wire Format** — If a custom binary protocol is detected, analyze the framing constants. Determine:
-   - Header size and structure
-   - Byte order (big-endian vs little-endian)
-   - Message type field location
-   - Payload length field location
+### Step 4: Write the protocol specification
 
-4. **Document Error Handling** — Extract error codes, error messages, and error response formats from strings. Map them to protocol states.
+Based on your reading, produce a protocol specification (`protocol-spec.md`):
 
-5. **Write SDK Implementation Notes** — Based on all findings, write concrete guidance:
-   - Which Swift types/libraries to use
-   - How to handle threading (actor, serial queue, @MainActor)
-   - What reconnection strategy to implement
-   - How to handle token refresh race conditions
+```markdown
+# Communication Protocol Analysis: <AppName>
 
-### Step 4: Deliver the protocol specification
+## Protocol Overview
+- Transport, Serialization, Auth scheme
 
-Present the completed protocol specification to the user. The specification is an AI-training document — feed it to an LLM with the prompt:
+## Connection Specification
+- Base URLs, ports, TLS config
 
-> "Write a Swift client SDK that implements this communication protocol."
+## Authentication Flow
+- Login request/response (real field names from headers)
+- Token storage mechanism
+- Token refresh flow
+- Auth header format
 
-The LLM should be able to generate a working SDK from the specification.
+## Message Catalog
+For each API endpoint or message type:
+- Direction, Trigger, Wire format, Schema, Example payload
 
-### Step 5: Offer next steps
+## Error Handling
+- Error response format, error code mapping
 
-Tell the user what they can do with the protocol specification:
-- **Generate SDK code**: "Feed the protocol-spec.md to an AI with: 'Write a Swift client SDK that implements this communication protocol.'"
-- **API extraction**: "I can also search for all HTTP endpoints and document them using /extract-ipa's Phase 5"
-- **Security audit**: "I can scan for security issues in how the protocol handles auth, encryption, and secrets"
-- **Deep binary reversing**: "I can decompile the network functions to verify the protocol details at the assembly level"
+## Session Lifecycle
+- Connect → Auth → Heartbeat → Reconnect → Disconnect
+
+## SDK Implementation Notes
+- Recommended libraries, Thread safety, Reconnection
+```
+
+### Step 5: Write the summary
+
+Based on the full spec, write a concise summary (`protocol-summary.md`) for AI prompt chaining:
+
+- Quick Facts table (transport, serialization, auth, token storage)
+- Endpoints table (method + path + purpose)
+- Auth flow (step-by-step)
+- Key data types (Codable structs needed)
+- SDK implementation checklist
+
+### Step 6: Deliver
+
+Tell the user what was produced. The user can feed `protocol-summary.md` to an AI with:
+> "Based on this protocol summary, write a complete Swift client SDK."
 
 Refer to the full skill documentation in `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/SKILL.md` for the complete workflow.

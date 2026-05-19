@@ -474,67 +474,41 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/detect-protect
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/anti-tampering-patterns.md` for the full reference on protection patterns and detection techniques.
 
-### Phase 11: Communication Protocol Extraction
+### Phase 11: Communication Protocol Discovery & Analysis
 
-Extract and document the app's underlying communication protocol — the wire format, message framing, serialization, authentication state machine, and session lifecycle. This phase produces an **AI-friendly protocol specification** designed for LLMs to read and generate client SDK wrapper code.
+Discover the app's underlying communication protocol through **AI-guided file analysis**. The script discovers and categorizes networking-related files; the AI reads those files to understand the protocol and produce a specification.
 
-**Action**: Run the protocol extraction script:
+**Architecture**: Script discovers files → AI reads files → AI writes protocol spec
 
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --report protocol-spec.md --summary protocol-summary.md
-```
-
-This generates two complementary documents:
-- `protocol-spec.md` — Full AI-friendly protocol specification (written incrementally as analysis progresses)
-- `protocol-summary.md` — Concise briefing for AI prompt chaining: Quick Facts, Endpoints table, Auth Flow, Key Types, and an SDK Implementation Checklist
-
-This script detects and documents:
-- **Transport layer** — HTTP/HTTPS, WebSocket, gRPC, custom TCP/UDP sockets, MQTT
-- **Serialization format** — JSON, Protocol Buffers, MessagePack, custom binary
-- **Message framing** — Length-prefixed, delimiter-based, fixed-size, TLV
-- **HTTP/REST protocol details** — base URLs, methods, headers, error format, pagination, rate limiting
-- **WebSocket protocol** — connection, message routing by event type, heartbeat/ping-pong, reconnection
-- **gRPC/Protobuf** — service methods, message definitions, field accessors
-- **Custom socket protocol** — connection params, I/O patterns, TLS, framing constants
-- **Authentication state machine** — login flow, token acquisition/storage/refresh, auth header injection
-- **Session lifecycle** — connection states, retry/backoff strategy, timeout configuration
-- **SDK implementation guidance** — recommended libraries, serialization, thread safety, error handling, reconnection
-
-The report is written **incrementally** — each section is appended to the file as it's discovered, so you can read partial results during analysis.
-
-**Targeted analysis:**
+**Action**: Run the file discovery script:
 
 ```bash
-# HTTP/REST protocol only
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --report http-protocol.md
-
-# WebSocket protocol only
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --websocket --report ws-protocol.md
-
-# gRPC / Protobuf only
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --grpc --report grpc-protocol.md
-
-# Custom socket protocol only
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --socket --report socket-protocol.md
-
-# Authentication flow only
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --auth --report auth-flow.md
-
-# HTTP + Auth (most common need) with summary
-bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --auth --report api-spec.md --summary api-summary.md
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/
 ```
 
-**LLM Analysis**: After the protocol extraction completes, read the generated report and enhance it:
+This produces three files in `<output>/protocol-analysis/`:
+- **`protocol-guide.md`** — Structured reading plan with files categorized by protocol area and priority
+- **`file-index.md`** — Complete categorized file list
+- **`relevant-strings.txt`** — Protocol-related strings (URLs, endpoints, auth patterns)
 
-1. **Transport Layer** — Verify the detected transports. Check if the app uses multiple transports (e.g., HTTP for API + WebSocket for real-time).
-2. **Message Catalog** — For each detected message type, extract the full schema from class-dump headers and strings. Write example payloads.
-3. **Auth State Machine** — Trace the complete login → token → refresh → logout flow. Note edge cases (offline, 401, rate limited).
-4. **Wire Format** — If a custom binary protocol is detected, analyze the framing constants and reconstruct the header structure.
-5. **SDK Guidance** — Based on all findings, write concrete SDK implementation notes: which Swift types to use, how to handle threading, what reconnection strategy to implement.
+The script discovers files by:
+- **Filename pattern** — Matching header filenames against 9 categories (HTTP_API_Client, Auth, Service_Layer, WebSocket, Socket_Custom, gRPC_Protobuf, MQTT, GraphQL, Serialization)
+- **API usage** — Grep inside headers to find files that use networking APIs but aren't named obviously
+- **Linked libraries** — Detecting Alamofire, Starscream, SocketRocket, gRPC, Agora, etc.
 
-**The generated protocol-spec.md is an AI-training document.** Feed it to an LLM with the prompt: "Write a Swift client SDK that implements this communication protocol." The LLM should be able to generate a working SDK from the specification alone.
+**AI Analysis**: After the script completes, the AI follows the reading guide:
 
-See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/protocol-extraction-guide.md` for detailed protocol detection techniques, message format reverse engineering, and SDK generation guidance.
+1. **Read `relevant-strings.txt`** — Get base URLs, endpoints, auth token patterns
+2. **Read Priority 1 files** (HTTP API Client, Auth) — Understand core networking and authentication
+3. **Read Priority 2 files** (Service Layer, WebSocket) — Understand real-time and business logic
+4. **Read Priority 3-4 files** — Understand specialized protocols and data models
+5. **For each file read** — Cross-reference with `relevant-strings.txt` for real values
+6. **Produce the protocol specification** — Full spec with protocol overview, connection spec, auth flow, message catalog, error handling, session lifecycle, SDK guidance
+7. **Write the summary** — Condensed version for AI prompt chaining
+
+The AI reads actual class-dump headers (not grep snippets), so it can understand method signatures, property types, protocol conformances, and class relationships — producing a more accurate specification than keyword matching alone.
+
+See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/protocol-extraction-guide.md` for the AI-friendly spec format, protocol type detection techniques, and SDK generation guidance.
 
 ## Output
 
