@@ -251,7 +251,7 @@ run_classdump() {
   fi
 
   # Run ipsw class-dump, output headers to directory
-  if $ipsw_cmd class-dump ${cd_args[@]+"${cd_args[@]}"} -H -o "$dest/class-dump" "$binary" 2>"$dest/class-dump/errors.log"; then
+  if $ipsw_cmd class-dump ${cd_args[@]+"${cd_args[@]}"} --headers -o "$dest/class-dump" "$binary" 2>"$dest/class-dump/errors.log"; then
     local count
     count=$(find "$dest/class-dump" -name "*.h" 2>/dev/null | wc -l | tr -d ' ')
     echo "  Headers extracted: $count"
@@ -264,12 +264,14 @@ run_classdump() {
       rm -f "$dest/class-dump/errors.log"
     fi
   else
-    echo "  [WARN] ipsw class-dump failed (binary may be encrypted or unsupported)"
-    echo "  See $dest/class-dump/errors.log for details"
-    # Try alternative: dump all to single file (ObjC only)
-    $ipsw_cmd class-dump ${cd_args[@]+"${cd_args[@]}"} "$binary" > "$dest/class-dump/all-headers.h" 2>/dev/null || true
+    echo "  [WARN] ipsw class-dump --headers failed (binary may be encrypted or unsupported)"
+    tail -3 "$dest/class-dump/errors.log" 2>/dev/null
+    # Try alternative: dump all to single file
+    $ipsw_cmd class-dump ${cd_args[@]+"${cd_args[@]}"} "$binary" > "$dest/class-dump/all-headers.h" 2>/dev/null
     if [[ -s "$dest/class-dump/all-headers.h" ]]; then
-      echo "  Partial output saved to class-dump/all-headers.h"
+      echo "  Full output saved to class-dump/all-headers.h"
+    else
+      echo "  No headers could be extracted — binary is likely FairPlay encrypted"
     fi
   fi
 
