@@ -512,18 +512,24 @@ See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/protocol-ex
 
 ### Phase 12: Dylib Injection Plugin Generation
 
-Generate a working dylib injection plugin based on the user's hook requirements and the reversed code analysis. Supports both Logos/Theos (`.xm` + `make package`) and pure ObjC (`.m` + `clang`) output. The AI analyzes class-dump output to verify the target, writes correct hook code with six built-in systems, builds the package, and documents the hook.
+Generate a working dylib injection plugin based on the user's hook requirements and the reversed code analysis. Supports both Logos/Theos (`.xm` + `make package`) and pure ObjC (`.m` + `clang`) output. The AI analyzes class-dump output to verify the target, intelligently selects which systems to enable (never blindly includes all), enforces 7 Mandatory Safety Rules (block copy, method enumeration, decrypt hooks, ivar enumeration, thread safety, constructor timing, singleton discovery), writes correct hook code, builds the package, and documents the hook.
 
 Every generated tweak includes six integrated systems that write to the app's Documents directory:
 
-| System | Output File | Purpose |
-|--------|-------------|---------|
-| Crash Logger | `<Tweak>_crash.log` | Captures ObjC exceptions + POSIX signals (SIGABRT, SIGSEGV, etc.) with full stack traces |
-| Hook Logger | `<Tweak>_hook.log` | Records every hook invocation with timestamps, class/method, original vs. modified values |
-| JSON Config | `<Tweak>_config.json` | Clean key-value hook settings, editable without recompiling |
-| Network Capture | `<Tweak>_network.jsonl` | Unified REQUEST/RESPONSE JSON Lines capture for protocol analysis |
-| Delayed Loading | (internal) | NSClassFromString polling with retry for classes in embedded frameworks |
-| Block Wrapping | (internal) | Intercepts completion blocks to capture network response data |
+| System | Output File | Purpose | When Enabled |
+|--------|-------------|---------|-------------|
+| Crash Logger | `<Tweak>/crash.log` | Captures ObjC exceptions + POSIX signals with full stack traces | ALWAYS |
+| Hook Logger | `<Tweak>/hook.log` | Records every hook invocation with timestamps | ALWAYS |
+| JSON Config | `<Tweak>/config.json` | Editable hook configuration | ALWAYS |
+| Method Enumeration (Rule 2) | (hook log) | class_copyMethodList for every target class | ALWAYS (MANDATORY) |
+| Network Capture | `<Tweak>/network.jsonl` | Unified REQUEST/RESPONSE JSON Lines capture | When SPEC mentions network I/O |
+| Delayed Loading (Rule 6) | (internal) | NSClassFromString polling with retry | When class in embedded framework |
+| Block Wrapping (Rule 1) | (internal) | Intercepts completion blocks; enforces [completion copy] | When method has completion: param |
+| NSURLSession Transport (Rule 5) | `<Tweak>/transport_response.json` | Transport-layer HTTP interception | User explicitly requests |
+| Decrypt Hook (Rule 3) | `<Tweak>/decrypted_response.json` | Hooks SDK decrypt-storage method | NSURLSession + encrypted responses |
+| KVC Polling | `<Tweak>/kvc_config.json` | valueForKey: polling with delays | C++ ivars or non-setter paths |
+| Ivar Enumeration (Rule 4) | `<Tweak>/ivar_values.json` | class_copyIvarList + object_getIvar | Setters + KVC both fail |
+| Singleton Discovery (Rule 7) | (internal) | Scans for +defaultContext/+shared patterns | Class has singleton class methods |
 
 **Prerequisites**: Theos is optional for building. If not installed, the AI generates the project ready to build:
 ```bash
@@ -581,7 +587,7 @@ tweaks/<TweakName>/
 3. Open TrollFools → select target app → inject dylib
 4. Launch app — hook is active. Logs appear in Documents directory.
 
-**Viewing logs on-device**: Use Filza to navigate to `/var/mobile/Containers/Data/Application/<App-UUID>/Documents/` and find the `<Tweak>_hook.log`, `<Tweak>_crash.log`, `<Tweak>_config.json`, and `<Tweak>_network.jsonl` files.
+**Viewing logs on-device**: Use Filza to navigate to `/var/mobile/Containers/Data/Application/<App-UUID>/Documents/<Tweak>/` and find the `hook.log`, `crash.log`, `config.json`, and `network.jsonl` files.
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/dylib-injection-guide.md` for the full enhanced Tweak.xm template, all four system implementations, network capture JSONL format, config JSON schema, and troubleshooting.
 
@@ -593,9 +599,9 @@ After a user runs a generated dylib and reports results (success or failure), th
 
 Ask the user to provide these files and read each one:
 
-- `<TweakName>_hook.log` — Check which hooks were installed, which triggered, timestamps, any errors
-- `<TweakName>_crash.log` — If non-empty, the dylib caused a crash; analyze the stack trace
-- `<TweakName>_config.json` — Verify it was auto-generated and contains all hook entries
+- `<TweakName>/hook.log` — Check which hooks were installed, which triggered, timestamps, any errors
+- `<TweakName>/crash.log` — If non-empty, the dylib caused a crash; analyze the stack trace
+- `<TweakName>/config.json` — Verify it was auto-generated and contains all hook entries
 
 #### Step 2: Diagnose from Log Patterns
 
@@ -604,7 +610,7 @@ Match the log evidence against this classification table:
 | Log Evidence | Diagnosis | Root Cause |
 |-------------|-----------|------------|
 | Hook installed but never triggered ("PASS-THROUGH" or no [HOOK:ENTER] lines) | App killed too early / SDK not initialized | User needs verification checklist — cold start + wait 10-15s |
-| Only backup-layer hooks trigger (e.g., FlyVerifyContext), P0 hooks missing | Primary class in embedded framework, loaded later than expected | Increase NSClassFromString retry count or interval in delayed loading |
+| Only backup-layer hooks trigger (e.g., internal context class), P0 hooks missing | Primary class in embedded framework, loaded later than expected | Increase NSClassFromString retry count or interval in delayed loading |
 | "SWIZZLE_FAIL" entries in log | Method signature mismatch between dylib and actual binary | Re-check class-dump header; the app version may differ |
 | crash.log has content | Hook code caused a crash | Check @try/@catch coverage, return type mismatch, wild pointer in repl_ function |
 | No files generated at all | Dylib not loaded or Documents path unresolvable | Check TrollFools injection, verify `__attribute__((constructor))` ran |
@@ -612,6 +618,13 @@ Match the log evidence against this classification table:
 | `_config.json` missing but hook log exists | JSON Config system was skipped during generation | HKTweakConfig class missing — hard blocker, see generate-dylib.md Step 5 item 1 |
 | NSLog output not appearing in idevicesyslog | Logger missing NSLog dual-output | writeLine: method missing `NSLog(@"[PREFIX] %@", line)` call |
 | Some hooks have config checks, others don't | Inconsistent HKTweakConfig integration | AI added config to some repl_ functions but not all |
+| SIGSEGV in NSURLSession completion or block wrapper | Block was stack-allocated and freed | Missing `[completion copy]` for `id`-typed block param (Rule 1) |
+| P0 hooks (public API name) never trigger but backup hooks work | Public API name ≠ runtime method name | Did not run class_copyMethodList before hooking (Rule 2) |
+| transport_response.json shows `{"res":"base64..."}` | Response is encrypted at transport layer | Missing decrypt-layer hook — need to hook the SDK's decrypt-storage method (Rule 3) |
+| All setter hooks silent + KVC polling returns all null | SDK bypasses setters and KVC via C++ ivar manipulation | Missing ivar enumeration — class_copyIvarList as 3rd capture layer (Rule 4) |
+| Intermittent SIGSEGV during JSON parse or writeToFile in completion block | Heavy Foundation work on CFNetwork internal thread | Missing dispatch_async to background queue in NSURLSession wrapped completion (Rule 5) |
+| "Target class not loaded" after 10 retries but class definitely exists | Constructor runs before embedded framework dyld loads | Retry delay too short or max retries too low — increase to 15 retries with 5s interval (Rule 6) |
+| KVC polling finds values but setters never triggered | Singleton populated via C++ code, not through ObjC setter path | Missing +defaultContext/+shared singleton discovery for KVC reads (Rule 7) |
 
 #### Step 3: Fix the Skill Files (NOT just the dylib)
 
@@ -619,11 +632,11 @@ Match the log evidence against this classification table:
 
 Fix priority order:
 
-1. **Reference guide template code** (`dylib-injection-guide.md`) — If the template has a bug, every future generation will replicate it. Fix the template first.
-2. **Command file constraints** (`generate-dylib.md`) — If AI skipped a system, tighten the validation checklist. Add grep verification. Add blocker language.
-3. **SKILL.md workflow** — If a Phase description is ambiguous, add clarifying language and concrete examples.
+1. **Reference guide template code** (`dylib-injection-guide.md`) — If the template has a bug, every future generation will replicate it. Fix the template first. The "Mandatory Safety Rules" chapter contains 7 rules that each address a known deployment failure mode.
+2. **Command file constraints** (`generate-dylib.md`) — If AI skipped a system, tighten the validation checklist. Add grep verification. Add blocker language. Validation items #24-#30 enforce the 7 mandatory rules at generation time.
+3. **SKILL.md workflow** — If a Phase description is ambiguous, add clarifying language and concrete examples. The diagnostic table maps log evidence to specific Mandatory Safety Rule violations.
 
-**Example**: If SoulKeyHook.m was missing HKTweakConfig → the root cause is that `generate-dylib.md` Step 5 didn't enforce it as a hard blocker. Fix: add a grep check and blocker language in Step 5.
+**Example**: If the generated tweak was missing HKTweakConfig → the root cause is that `generate-dylib.md` Step 5 didn't enforce it as a hard blocker. Fix: add a grep check and blocker language in Step 5.
 
 #### Step 4: Record the Fix in Memory
 
@@ -642,7 +655,7 @@ This ensures future AI instances in new sessions benefit from the learning.
 1. Read hook log → Only "Dylib Loaded" and "Target classes not loaded" lines. No hook triggers.
 2. Read dylib source → `setupWithPath:` accepts one arg but was called with two (tmpLogPath silently dropped). P0 hooks in retry loop never escaped because app was killed too fast.
 3. Diagnosis: (a) Logger had dead /tmp code — NSLog wasn't being used. (b) App runtime too short.
-4. Fix `dylib-injection-guide.md`: Logger writeLine now includes `NSLog(@"[SOUL_HOOK] ...")` for real-time output.
+4. Fix `dylib-injection-guide.md`: Logger writeLine now includes `NSLog(@"[%@] ...", TWEAK_NAME)` for real-time output.
 5. Fix `generate-dylib.md`: README template now includes verification checklist telling user to wait 10-15 seconds.
 6. Save project memory: "Dylib loggers must use NSLog dual-output since App sandbox can't write to /tmp. Users need explicit cold-start wait instructions."
 

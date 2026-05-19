@@ -8,7 +8,7 @@ argument: description of what class/method to hook and the desired behavior
 
 # /generate-dylib
 
-Analyze reversed iOS app code and generate a working dylib injection plugin. Supports both Logos/Theos (`.xm` + `make package`) and pure ObjC (`.m` + `clang`) output. Every generated tweak includes six built-in systems: crash/exception logging, file-based hook trace, editable JSON configuration, unified network protocol capture, delayed class loading with retry, and completion block wrapping for network response interception. Write clean, compilable hook code, validate syntax, build the package, and produce accompanying documentation.
+Analyze reversed iOS app code and generate a working dylib injection plugin. Supports both Logos/Theos (`.xm` + `make package`) and pure ObjC (`.m` + `clang`) output. Every generated tweak includes mandatory systems (crash handler, hook logger, JSON config) plus conditionally-enabled systems (network capture, delayed loading, block wrapping, NSURLSession transport, decrypt hooks, ivar enumeration, singleton discovery) based on class-dump analysis. Enforces 7 Mandatory Safety Rules derived from real deployment failures. Write clean, compilable hook code, validate syntax, build the package, and produce accompanying documentation.
 
 ## Instructions
 
@@ -23,6 +23,10 @@ Parse the user's input to identify:
 - **Desired behavior** — what the hook should return or do instead
 - **Target app** — which app to inject into (the user may mention an IPA they previously analyzed)
 - **Network capture needed** — is the hook target a network/communication method? (URLSession, Alamofire, AFNetworking, Moya, custom socket, etc.)
+- **NSURLSession transport layer** — does the user want to intercept ALL HTTP traffic at the transport layer? If they say "capture all HTTP", "transport layer", "URLSession hook", or "底层拦截", enable System 7 (NSURLSession Transport-Layer Interception). This is OPTIONAL and only added when explicitly requested.
+- **Decrypt/plaintext capture** — does the user mention "解密", "decrypt", "plaintext", or "明文"? If NSURLSession transport is enabled AND the API encrypts responses, a decrypt-layer hook MUST be added (MANDATORY: enumerate instance methods for `set*Cache*`/`set*Response*`/`set*Config*` on the SDK context class).
+- **Method enumeration** — does the user say "枚举方法", "list methods", "explore API surface", or "discover all endpoints"? If so, add `class_copyMethodList` enumeration for ALL target classes (MANDATORY per Rule 2 — public API names ≠ runtime names).
+- **Three-layer capture** — does the class-dump show C++ types in ivars or the user mentions "C++ ivars", "直接写ivar"? Enable ivar enumeration (Rule 4 Layer 3) as a fallback when setters + KVC return nothing.
 
 If the user's description is ambiguous, ask clarifying questions to pin down:
 - Exact class name (case-sensitive)
@@ -71,6 +75,58 @@ If the class or method cannot be found in the analysis output, tell the user and
 - Re-running `/extract-ipa` with full class-dump
 - Checking if the class name might be obfuscated (short random names)
 - Looking for the method in a parent class
+
+#### Step 2.1: Read Class-Dump Headers for ALL Target Classes
+
+For each class you plan to hook, read the `.h` file from the class-dump output with the Read tool. This is REQUIRED — do not guess method signatures.
+
+```bash
+# Find all class headers related to the hook target
+find <analysis-dir>/class-dump/ -name "<ClassName>.h"
+find <analysis-dir>/class-dump/ -name "*.h" | xargs grep -l "<ClassName>"
+```
+
+Read each header file fully to understand:
+- Exact method signatures (return type, parameter count, parameter types)
+- Property declarations (and whether they use C++ types like `std::string`)
+- Instance (`-`) vs class (`+`) methods
+- Singleton accessors (`+defaultContext`, `+shared`, `+sharedInstance`, `+defaultManager`)
+- Completion block parameter types (are they typed as `id` or properly typed `void (^)(...)`?)
+
+#### Step 2.2: Run class_copyMethodList Enumeration (MANDATORY)
+
+CRITICAL: Public API method names in class-dump headers are NOT necessarily the methods called at runtime. SDKs commonly expose a facade (e.g., `+[<PublicSDKClass> <initMethod>:]`) but route internally through private context methods (e.g., `-[<InternalContextClass> _<privateRegisterMethod>:...]`).
+
+Every generated dylib MUST include `class_copyMethodList` enumeration for each target class. This logs ALL runtime methods, so the user can identify which method is actually called.
+
+#### Step 2.3: System Selection Decision Tree
+
+Use this table to decide which built-in systems to include. Do NOT blindly include all systems — verify each against the class-dump headers and user's SPEC.
+
+| System | Enable Condition | Verify by Reading |
+|--------|-----------------|-------------------|
+| Crash Logger | ALWAYS | - |
+| Hook Logger | ALWAYS | - |
+| JSON Config | ALWAYS | - |
+| Network Capture (HKTweakNetworkCapture) | Method takes completion block AND SPEC mentions network I/O | Read .h for `completion:` param in method signature |
+| Delayed Loading | Class .h is NOT in main binary class-dump directory | Check if .h is under a Framework subdirectory (e.g., `class-dump/Frameworks/ZZT/`) |
+| Block Wrapping | Method signature contains `completion:` or `block:` parameter | Read .h to confirm block argument type |
+| NSURLSession Transport | User explicitly requests "底层拦截" / "capture all HTTP" / "transport layer" | User request ONLY — do NOT add by default |
+| KVC Polling | Evidence of non-setter value paths (C++ ivars, `object_setIvar` in code, values stale after setter hooks) | Read .h for C++ types (`std::string`, `std::vector`) in ivar declarations |
+| Enumeration (class_copyMethodList) | ALWAYS for every target class (Rule 2 — MANDATORY) | Must appear in generated code; verified in Step 5 |
+| Decrypt Hook | NSURLSession transport enabled AND API encrypts responses | After enumerating SDK context class methods, look for `set*Cache*`/`set*Response*`/`set*Config*` |
+| Ivar Enumeration (Layer 3) | Setters + KVC both return nothing after 20+ seconds | Read .h for C++ types OR user reports "setter hooks silent, KVC all null" |
+| Singleton Discovery | Target class has `+defaultContext`/`+shared`/`+sharedInstance`/`+defaultManager` in class-dump | Read .h for class methods matching singleton patterns |
+
+**Decision logic**:
+```
+1. ALWAYS: Crash Logger + Hook Logger + JSON Config + Method Enumeration
+2. IF completion: block in hooked method → Block Wrapping (+ Network Capture if SPEC mentions network)
+3. IF class in embedded framework → Delayed Loading
+4. IF user requests "capture all HTTP" → NSURLSession Transport → also enable Decrypt Hook + Ivar Enumeration
+5. IF class-dump shows C++ ivars → KVC Polling + Ivar Enumeration
+6. IF class-dump shows +defaultContext/+shared/etc → Singleton Discovery
+```
 
 ### Step 3: Design the Hook
 
@@ -330,6 +386,14 @@ Before writing files, verify:
 20. **ldid signing applied** — dylib must be pseudo-signed with `ldid -S` before TrollFools injection
 21. **NSLog dual-output in writeLine** — the Logger's `writeLine:` method must call `NSLog(@"[HOOK_PREFIX] %@", line)` before the file write, so `idevicesyslog | grep HOOK_PREFIX` works for real-time monitoring
 22. **Every `repl_` function checks config** — each replacement implementation must call `[[HKTweakConfig shared] isHookEnabled:]` and pass through to orig if disabled
+23. **Output files use subfolder** — all files go into `Documents/<TweakName>/` subfolder (create with `createDirectoryAtPath:`), NOT flat in Documents root. File names are `hook.log`, `crash.log`, `config.json` etc. — no `<TweakName>_` prefix.
+24. **Every `id`-typed block param has `[completion copy]`** — when a hooked method's completion/block parameter is typed as `id` (NOT `void (^)(...)`), the generated code MUST call `[completion copy]` before wrapping. Stack blocks will be freed after the method returns, causing SIGSEGV. Verify with: `grep -n '(id).*completion\|(id).*block' <output>.m` — every match must have a corresponding `[xxx copy]` nearby.
+25. **`class_copyMethodList` run on EVERY target class** — this is a HARD BLOCKER. Every generated dylib MUST enumerate methods for each target class before hooking. The hook targets the ACTUAL runtime method name, not the public API name guessed from class-dump. Verify: `grep -c 'class_copyMethodList' <output>.m` must be >= number of target classes.
+26. **Decrypt/response-storage hook present when transport layer enabled** — NSURLSession alone captures ciphertext. Must also enumerate instance methods on the SDK context class for `set*Cache*`/`set*Response*`/`set*Config*` and hook the decrypt-storage method. Verify: if NSURLSession hook exists, grep for `setConfigureInfoMemeryCache\|decrypt\|plaintext` or ivar enumeration on context class.
+27. **Ivar enumeration added as Layer 3 fallback** — when class-dump shows C++ ivar types (`std::string`, etc.), add `class_copyIvarList` + `object_getIvar` polling. This catches values set via C++ assignment that bypass ObjC setters AND KVC. Verify: grep for `class_copyIvarList` in `<output>.m`.
+28. **NSURLSession completion dispatches heavy work** — `dispatch_async(background_queue, ^{ JSON parse / file write })` MUST be used inside the wrapped NSURLSession completion. Heavy work on the CFNetwork internal thread causes intermittent SIGSEGV. Verify: grep for `dispatch_async.*background.*queue` near `wrappedCompletion`.
+29. **Constructor uses dispatch_after + backoff** — never assume classes exist at `%ctor` time. Must use `NSClassFromString` check + `dispatch_after` with increasing delays (0.5s first, 3.0s subsequent, max 10 retries). Verify: grep for `dispatch_after` and `NSClassFromString` in constructor section.
+30. **Singleton class methods enumerated** — after `class_copyMethodList`, scan for `defaultContext`/`shared`/`sharedInstance`/`defaultManager`/`defaultInstance` patterns. Use the singleton for KVC reads and ivar enumeration. Verify: grep for `defaultContext\|singleton\|sharedInstance` in `<output>.m`.
 
 **Count verification**:
 ```bash
@@ -342,12 +406,28 @@ grep -c '%end' <tweak-dir>/Tweak.xm
 grep -c 'HKTweakConfig' <tweak-dir>/Tweak.xm
 grep -c 'HKTweakConfig' <tweak-dir>/<TweakName>.m
 
+# class_copyMethodList MUST exist — at least 1 per target class (Rule 2 MANDATORY)
+grep -c 'class_copyMethodList' <tweak-dir>/<TweakName>.m
+
+# [completion copy] MUST exist when (id) block params present (Rule 1 CRITICAL)
+grep -c 'copy\]' <tweak-dir>/<TweakName>.m
+
+# dispatch_after MUST exist when target class is in embedded framework (Rule 6)
+grep -c 'dispatch_after' <tweak-dir>/<TweakName>.m
+
+# dispatch_async to background queue MUST exist when NSURLSession hook present (Rule 5)
+grep -c 'dispatch_async.*background' <tweak-dir>/<TweakName>.m
+
 # %ctor order MUST be: setupCrashHandler → setupWithPath → loadFromPath → tryInstallHooks
 grep -n 'setupCrashHandler\|setupWithPath\|loadFromPath\|tryInstallHooks' <tweak-dir>/Tweak.xm
 grep -n 'setupCrashHandler\|setupWithPath\|loadFromPath\|tryInstallHooks' <tweak-dir>/<TweakName>.m
 ```
 
 **If HKTweakConfig grep returns 0**: The generation is INCOMPLETE. Add the full HKTweakConfig class from the reference guide template and re-verify. Do not proceed to build.
+
+**If class_copyMethodList grep returns 0**: BLOCK the generation. Method enumeration is MANDATORY (Rule 2). Add `enumerateClassMethods()` for each target class before any swizzling.
+
+**If [completion copy] grep returns 0 but method signature has (id) block params**: BLOCK. Rule 1 — `id`-typed block params MUST be copied to heap. Add `[completion copy]` before wrapping.
 
 **If %ctor order is wrong**: Reorder the constructor to follow crash→logger→config→hooks. Any deviation from this order is a blocker.
 
@@ -420,10 +500,10 @@ This tweak includes four integrated systems:
 
 | System | File (in App Documents) | Purpose |
 |--------|------------------------|---------|
-| Crash Logger | `<TweakName>_crash.log` | Captures ObjC exceptions + native signals with stack traces |
-| Hook Logger | `<TweakName>_hook.log` | Records every hook invocation with timestamps and values |
-| JSON Config | `<TweakName>_config.json` | Editable configuration — toggle hooks or change values without recompiling |
-| Network Capture | `<TweakName>_network.jsonl` | Unified REQUEST/RESPONSE capture for protocol analysis |
+| Crash Logger | `<TweakName>/crash.log` | Captures ObjC exceptions + native signals with stack traces |
+| Hook Logger | `<TweakName>/hook.log` | Records every hook invocation with timestamps and values |
+| JSON Config | `<TweakName>/config.json` | Editable configuration — toggle hooks or change values without recompiling |
+| Network Capture | `<TweakName>/network.jsonl` | Unified REQUEST/RESPONSE capture for protocol analysis |
 
 ## How It Works
 
@@ -436,7 +516,7 @@ This tweak includes four integrated systems:
 
 ## Hook Configuration (JSON)
 
-Edit `<TweakName>_config.json` in the app's Documents directory:
+Edit `<TweakName>/config.json` in the app's Documents directory:
 
 ```json
 {
@@ -490,30 +570,30 @@ After injecting the dylib, follow these steps to verify it's working:
 - [ ] **Cold start the app** — tap the app icon to launch it fresh (NOT from background)
 - [ ] **Wait 10-15 seconds** — let the SDK initialize and network requests complete. Do NOT kill the app immediately.
 - [ ] **Trigger key actions** — log in, refresh the home page, or do whatever action triggers the hooked methods. Wait another 5-10 seconds.
-- [ ] **Check Documents directory with Filza** — navigate to the app's Documents folder and verify these files exist:
-  - `<TweakName>_hook.log` — should show "Dylib Loaded" and hook entries
-  - `<TweakName>_config.json` — should be auto-generated on first launch
-  - `<TweakName>_crash.log` — should be empty (no crashes)
+- [ ] **Check Documents subfolder with Filza** — navigate to `Documents/<TweakName>/` and verify these files exist:
+  - `<TweakName>/hook.log` — should show "Dylib Loaded" and hook entries
+  - `<TweakName>/config.json` — should be auto-generated on first launch
+  - `<TweakName>/crash.log` — should be empty (no crashes)
 - [ ] **If hook log only has initialization lines** but no hook calls, the app hasn't run long enough. Keep the app open longer and check again.
-- [ ] **Real-time monitoring**: run `idevicesyslog | grep SOUL_HOOK` in a terminal to watch log output live. All hook events are echoed to NSLog with the SOUL_HOOK prefix.
+- [ ] **Real-time monitoring**: run `idevicesyslog | grep <TweakName>` in a terminal to watch log output live. All hook events are echoed to NSLog with the `<TweakName>` prefix.
 - [ ] **All output files are in Documents** — if you don't see files in /tmp, that's expected. The primary output is always the Documents directory.
 
 ## Viewing Logs on Device
 
-Use **Filza** to navigate to the app's Documents directory:
+Use **Filza** to navigate to the app's Documents subfolder:
 ```
-/var/mobile/Containers/Data/Application/<App-UUID>/Documents/
+/var/mobile/Containers/Data/Application/<App-UUID>/Documents/<TweakName>/
 ```
 
-Look for these files:
-- `<TweakName>_hook.log` — Hook invocation trace (check this first if behavior is unexpected)
-- `<TweakName>_crash.log` — Crash reports (should stay empty; if not, read for the crash reason)
-- `<TweakName>_config.json` — Edit this to change hook behavior without reinstalling
-- `<TweakName>_network.jsonl` — Captured network traffic (if applicable)
+All output files are inside this subfolder:
+- `hook.log` — Hook invocation trace (check this first if behavior is unexpected)
+- `crash.log` — Crash reports (should stay empty; if not, read for the crash reason)
+- `config.json` — Edit this to change hook behavior without reinstalling
+- `network.jsonl` — Captured network traffic (if applicable)
 
 For real-time monitoring without Filza:
 ```bash
-idevicesyslog | grep SOUL_HOOK
+idevicesyslog | grep <TweakName>
 ```
 
 ## Files

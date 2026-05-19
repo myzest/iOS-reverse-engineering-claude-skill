@@ -8,10 +8,10 @@ Every AI-generated tweak ships with these four integrated systems:
 
 | System | Purpose | Output Location |
 |--------|---------|-----------------|
-| **Crash Logger** | Captures ObjC exceptions + POSIX signals (SIGABRT, SIGSEGV, SIGBUS, SIGTRAP) with full stack traces | `Documents/<TweakName>_crash.log` |
-| **Hook Logger** | Records every hook invocation with timestamps, class/method, original vs. modified values | `Documents/<TweakName>_hook.log` |
-| **JSON Config** | Clean key-value hook configuration, editable without recompiling | `Documents/<TweakName>_config.json` |
-| **Network Capture** | Unified REQUEST/RESPONSE JSON Lines capture for protocol analysis | `Documents/<TweakName>_network.jsonl` |
+| **Crash Logger** | Captures ObjC exceptions + POSIX signals (SIGABRT, SIGSEGV, SIGBUS, SIGTRAP) with full stack traces | `Documents/<TweakName>/crash.log` |
+| **Hook Logger** | Records every hook invocation with timestamps, class/method, original vs. modified values | `Documents/<TweakName>/hook.log` |
+| **JSON Config** | Clean key-value hook configuration, editable without recompiling | `Documents/<TweakName>/config.json` |
+| **Network Capture** | Unified REQUEST/RESPONSE JSON Lines capture for protocol analysis | `Documents/<TweakName>/network.jsonl` |
 | **Delayed Loading** | NSClassFromString polling with retry for classes in embedded frameworks | (internal — enables hooks) |
 | **Block Wrapping** | Intercepts completion/callback blocks to capture response data from network calls | (internal — feeds Network Capture) |
 
@@ -225,7 +225,7 @@ Depends: mobilesubstrate
 
 ## System 1: Crash Logging
 
-Captures all crashes — both ObjC exceptions and native signals — and writes a detailed crash report to `Documents/<TweakName>_crash.log`. This is the first thing initialized in `%ctor`, before any hooks activate.
+Captures all crashes — both ObjC exceptions and native signals — and writes a detailed crash report to `Documents/<TweakName>/crash.log`. This is the first thing initialized in `%ctor`, before any hooks activate.
 
 ### Crash Handler Code (placed at top of Tweak.xm, before any %hook blocks)
 
@@ -326,7 +326,7 @@ static void setupCrashHandler(NSString *crashLogPath) {
 
 ## System 2: File-Based Hook Logger
 
-Every hook invocation records a structured log entry to `Documents/<TweakName>_hook.log`. The logger uses a ring buffer and flushes periodically.
+Every hook invocation records a structured log entry to `Documents/<TweakName>/hook.log`. The logger uses a ring buffer and flushes periodically.
 
 ### Logger Code (placed after crash handler, before any %hook blocks)
 
@@ -381,7 +381,7 @@ Every hook invocation records a structured log entry to `Documents/<TweakName>_h
 
 - (void)writeLine:(NSString *)line {
     // NSLog dual-output for real-time idevicesyslog monitoring
-    NSLog(@"[SOUL_HOOK] %@", line);
+    NSLog(@"[%@] %@", TWEAK_NAME, line);
 
     dispatch_async(_queue, ^{
         NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [self timestamp], line];
@@ -473,7 +473,7 @@ For hooks that call `%orig`:
 
 ## System 3: JSON Hook Configuration
 
-The dylib writes a clean JSON config file to `Documents/<TweakName>_config.json` on first launch. The user can edit this JSON to change hook behavior without recompiling. On subsequent launches, the dylib reads the config and applies settings.
+The dylib writes a clean JSON config file to `Documents/<TweakName>/config.json` on first launch. The user can edit this JSON to change hook behavior without recompiling. On subsequent launches, the dylib reads the config and applies settings.
 
 ### Config File Format
 
@@ -589,7 +589,7 @@ The dylib writes a clean JSON config file to `Documents/<TweakName>_config.json`
 
 ## System 4: Unified Network Protocol Capture
 
-When hooking network communication methods (URLSession, Alamofire, custom socket protocols, etc.), the dylib captures request and response data in a unified JSON Lines (`.jsonl`) format in `Documents/<TweakName>_network.jsonl`.
+When hooking network communication methods (URLSession, Alamofire, custom socket protocols, etc.), the dylib captures request and response data in a unified JSON Lines (`.jsonl`) format in `Documents/<TweakName>/network.jsonl`.
 
 ### Network Capture Format
 
@@ -758,7 +758,7 @@ Each line is a self-contained JSON object:
 
 ## System 5: Delayed Class Loading with Retry
 
-When the target class lives in an embedded framework — not the main binary — it may not be loaded yet when the dylib's `%ctor` runs. This is common with third-party SDKs (FlyVerify, ZZT, etc.). The solution is a retry mechanism that polls `NSClassFromString` at intervals before attempting the hook.
+When the target class lives in an embedded framework — not the main binary — it may not be loaded yet when the dylib's `%ctor` runs. This is common with third-party SDKs (e.g., analytics, security, or ad SDKs). The solution is a retry mechanism that polls `NSClassFromString` at intervals before attempting the hook.
 
 ### Retry Loader Code
 
@@ -780,10 +780,10 @@ static void tryInstallHooks(void) {
     if (hooksInstalled) return;
 
     // Check if all required classes are available
-    Class flyeSDK = NSClassFromString(@"FLYEASDK");
-    Class flyVerifyService = NSClassFromString(@"FlyVerifyService");
+    Class targetCls1 = NSClassFromString(@"<TargetClass1>");
+    Class targetCls2 = NSClassFromString(@"<TargetClass2>");
 
-    if (!flyeSDK || !flyVerifyService) {
+    if (!targetCls1 || !targetCls2) {
         static int retryCount = 0;
         retryCount++;
         if (retryCount == 1) {
@@ -817,14 +817,16 @@ In `%ctor`, replace the immediate `%init` with a deferred approach:
 %ctor {
     // 1. Crash handler FIRST
     NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    setupCrashHandler([docs stringByAppendingPathComponent:@TWEAK_NAME "_crash.log"]);
+    NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    setupCrashHandler([dir stringByAppendingPathComponent:@"crash.log"]);
 
     // 2. Logger
-    [[HKTweakLogger shared] setupWithPath:[docs stringByAppendingPathComponent:@TWEAK_NAME "_hook.log"]];
+    [[HKTweakLogger shared] setupWithPath:[dir stringByAppendingPathComponent:@"hook.log"]];
     [[HKTweakLogger shared] logInfo:@"Dylib loaded (PID: %d)", getpid()];
 
     // 3. Config
-    NSString *cfgPath = [docs stringByAppendingPathComponent:@TWEAK_NAME "_config.json"];
+    NSString *cfgPath = [dir stringByAppendingPathComponent:@"config.json"];
     [[HKTweakConfig shared] loadFromPath:cfgPath defaults:defaultConfig];
 
     // 4. Attempt hook installation — will retry if classes not loaded
@@ -841,17 +843,17 @@ In `%ctor`, replace the immediate `%init` with a deferred approach:
 ```objc
 %group DelayedHooks
 
-%hook FLYEASDK
-+ (void)initWithSelfKey:(NSString *)selfKey appSecret:(NSString *)appSecret {
+%hook <TargetClass>
++ (void)<initMethod>:(NSString *)key1 appSecret:(NSString *)key2 {
     @try {
-        [[HKTweakLogger shared] logHookEnter:@"FLYEASDK" selector:@"+initWithSelfKey:appSecret:"
-                                        args:[NSString stringWithFormat:@"selfKey=%@ appSecret=%@", selfKey, appSecret]];
+        [[HKTweakLogger shared] logHookEnter:@"<TargetClass>" selector:@"+<initMethod>:appSecret:"
+                                        args:[NSString stringWithFormat:@"key1=%@ key2=%@", key1, key2]];
     } @catch (NSException *e) {}
 
     %orig;
 
     @try {
-        [[HKTweakLogger shared] logHookVoid:@"FLYEASDK" selector:@"+initWithSelfKey:appSecret:" skipped:NO];
+        [[HKTweakLogger shared] logHookVoid:@"<TargetClass>" selector:@"+<initMethod>:appSecret:" skipped:NO];
     } @catch (NSException *e) {}
 }
 %end
@@ -875,48 +877,51 @@ When hooking a method that takes a completion/callback block (e.g., `completion:
 ### Block Wrapping Pattern
 
 ```objc
-%hook FlyVerifyService
-+ (void)getInitConfigAppKey:(NSString *)appKey
+%hook <ServiceClass>
++ (void)<initConfigMethod>:(NSString *)appKey
                      secret:(NSString *)secret
                        duid:(NSString *)duid
                 completion:(void (^)(NSDictionary *response, NSError *error))completion {
 
-    [[HKTweakLogger shared] logHookEnter:@"FlyVerifyService"
-                                selector:@"+getInitConfigAppKey:secret:duid:completion:"
+    [[HKTweakLogger shared] logHookEnter:@"<ServiceClass>"
+                                selector:@"+<initConfigMethod>:secret:duid:completion:"
                                     args:[NSString stringWithFormat:@"appKey=%@ duid=%@", appKey, duid]];
 
     // Capture the request parameters immediately
-    [[HKTweakNetworkCapture shared] captureRequest:@"api-auth.zztfly.com/api/bd/initSec"
+    [[HKTweakNetworkCapture shared] captureRequest:@"<TARGET_API_URL>"
                                             method:@"POST"
                                            headers:nil
                                               body:@{@"appKey": appKey ?: @"", @"duid": duid ?: @""}
-                                            caller:@"FlyVerifyService.getInitConfig"];
+                                            caller:@"<ServiceClass>.<initConfigMethod>"];
 
     // Wrap the completion block to intercept the response
     void (^wrappedCompletion)(NSDictionary *, NSError *) = ^(NSDictionary *response, NSError *error) {
         @try {
             if (response) {
-                [[HKTweakLogger shared] logEvent:@"INITSEC_RESPONSE"
-                                          detail:[NSString stringWithFormat:@"accessKey=%@ channel=%@ deviceType=%@",
-                                                  response[@"accessKey"], response[@"channel"], response[@"deviceType"]]];
+                [[HKTweakLogger shared] logEvent:@"<EVENT_NAME>_RESPONSE"
+                                          detail:[NSString stringWithFormat:@"keys: %@",
+                                                  [response allKeys]]];
 
-                // Save full response to a dedicated JSON file
+                // Save full response to a dedicated JSON file (in subfolder)
                 NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                       NSUserDomainMask, YES) firstObject];
-                NSString *respPath = [docs stringByAppendingPathComponent:@TWEAK_NAME "_initsec_response.json"];
+                NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+                [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                          withIntermediateDirectories:YES attributes:nil error:nil];
+                NSString *respPath = [dir stringByAppendingPathComponent:@"captured_response.json"];
                 NSData *json = [NSJSONSerialization dataWithJSONObject:response
                                     options:NSJSONWritingPrettyPrinted error:nil];
                 [json writeToFile:respPath atomically:YES];
 
                 // Capture response in network log
-                [[HKTweakNetworkCapture shared] captureResponse:@"api-auth.zztfly.com/api/bd/initSec"
+                [[HKTweakNetworkCapture shared] captureResponse:@"<TARGET_API_URL>"
                                                      statusCode:200
                                                         headers:nil
                                                            body:response
-                                                         caller:@"FlyVerifyService.getInitConfig"];
+                                                         caller:@"<ServiceClass>.<initConfigMethod>"];
             }
             if (error) {
-                [[HKTweakLogger shared] logEvent:@"INITSEC_ERROR"
+                [[HKTweakLogger shared] logEvent:@"<EVENT_NAME>_ERROR"
                                           detail:[NSString stringWithFormat:@"code=%ld domain=%@",
                                                   (long)error.code, error.domain]];
             }
@@ -945,6 +950,504 @@ When hooking a method that takes a completion/callback block (e.g., `completion:
 
 ---
 
+## System 7: NSURLSession Transport-Layer Interception (Optional)
+
+When the user wants to capture ALL HTTP traffic regardless of which upper-level SDK class makes the request, hook `-[NSURLSession dataTaskWithRequest:completionHandler:]`. This is the lowest-level HTTP API in iOS — every networking library (URLSession, Alamofire, AFNetworking, Moya) passes through it. One hook catches everything.
+
+**When to include**: User requests "capture all HTTP traffic", "transport layer", "NSURLSession hook", or the SPEC mentions it. This is OPTIONAL — only add it when asked.
+
+**Principle**: Filter by URL pattern (e.g., `containsString:@"api.example.com"`) so you only capture the target API, not every request the app makes (analytics, images, etc.).
+
+### NSURLSession Transport Hook Template (Pure ObjC)
+
+```objc
+// ---- P4: -[NSURLSession dataTaskWithRequest:completionHandler:] (transport layer) ----
+static NSURLSessionDataTask * (*orig_NSURLSession_dataTaskWithRequest_completionHandler)(
+    id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *));
+
+static NSURLSessionDataTask *repl_NSURLSession_dataTaskWithRequest_completionHandler(
+    id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+
+    NSString *url = request.URL.absoluteString;
+
+    // Only intercept target URLs — filter to avoid capturing analytics/images/etc.
+    BOOL isTargetURL = [url containsString:@"<TARGET_DOMAIN>"];  // e.g., @"api-auth.zztfly.com"
+
+    if (isTargetURL) {
+        @try {
+            [[HKTweakLogger shared] logEvent:@"NSURLSession_REQUEST"
+                                      detail:[NSString stringWithFormat:@"%@ %@", request.HTTPMethod, url]];
+
+            // Log request headers
+            NSDictionary *reqHeaders = [request allHTTPHeaderFields];
+            if (reqHeaders.count > 0) {
+                [[HKTweakLogger shared] logEvent:@"REQUEST_HEADERS"
+                                          detail:[NSString stringWithFormat:@"%@", reqHeaders]];
+            }
+
+            // Log request body
+            if (request.HTTPBody) {
+                NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+                if (body) [[HKTweakLogger shared] logEvent:@"REQUEST_BODY" detail:body];
+            }
+        } @catch (NSException *e) {}
+    }
+
+    // Wrap completion handler to capture RESPONSE
+    void (^wrappedCompletion)(NSData *, NSURLResponse *, NSError *) =
+        ^(NSData *data, NSURLResponse *response, NSError *error) {
+            @try {
+                if (isTargetURL && data && !error) {
+                    NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                    NSInteger statusCode = httpResp.statusCode;
+
+                    [[HKTweakLogger shared] logEvent:@"NSURLSession_RESPONSE"
+                                              detail:[NSString stringWithFormat:@"status=%ld url=%@",
+                                                      (long)statusCode, url]];
+
+                    // Parse and save JSON response
+                    NSError *jsonErr = nil;
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonErr];
+                    if (json) {
+                        // Save to subfolder
+                        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                  NSUserDomainMask, YES) firstObject];
+                        NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+                        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                                  withIntermediateDirectories:YES attributes:nil error:nil];
+
+                        NSMutableDictionary *saved = [NSMutableDictionary dictionaryWithDictionary:json];
+                        saved[@"_captured_at"] = @([[NSDate date] timeIntervalSince1970]);
+                        saved[@"_url"] = url;
+                        saved[@"_method"] = @"NSURLSession transport";
+
+                        NSData *outJson = [NSJSONSerialization dataWithJSONObject:saved
+                                            options:NSJSONWritingPrettyPrinted error:nil];
+                        [outJson writeToFile:[dir stringByAppendingPathComponent:@"transport_response.json"]
+                                  atomically:YES];
+
+                        [[HKTweakLogger shared] logEvent:@"TRANSPORT_CAPTURED"
+                                                  detail:[NSString stringWithFormat:@"transport layer, url=%@", url]];
+                    } else {
+                        // Non-JSON response — log as text (truncated)
+                        NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                        if (body.length > 500) body = [[body substringToIndex:500] stringByAppendingString:@"..."];
+                        [[HKTweakLogger shared] logEvent:@"RESPONSE_BODY" detail:body ?: @"(binary)"];
+                    }
+                }
+                if (error) {
+                    [[HKTweakLogger shared] logEvent:@"NSURLSession_ERROR"
+                                              detail:[NSString stringWithFormat:@"code=%ld domain=%@ url=%@",
+                                                      (long)error.code, error.domain, url]];
+                }
+            } @catch (NSException *e) {
+                [[HKTweakLogger shared] logEvent:@"NSURLSession_CAPTURE_ERROR"
+                                          detail:[NSString stringWithFormat:@"%@", e.reason]];
+            }
+
+            // ALWAYS call original completion
+            if (completionHandler) completionHandler(data, response, error);
+        };
+
+    // Call original with wrapped completion
+    if (orig_NSURLSession_dataTaskWithRequest_completionHandler) {
+        return orig_NSURLSession_dataTaskWithRequest_completionHandler(
+            self, _cmd, request, wrappedCompletion);
+    }
+    return nil;
+}
+
+// Installation (called from installAllHooks):
+// Class nsurlSession = NSClassFromString(@"NSURLSession");
+// if (nsurlSession) {
+//     swizzleInstanceMethod(nsurlSession,
+//         NSSelectorFromString(@"dataTaskWithRequest:completionHandler:"),
+//         (IMP)repl_NSURLSession_dataTaskWithRequest_completionHandler,
+//         (void **)&orig_NSURLSession_dataTaskWithRequest_completionHandler);
+// }
+```
+
+**Integration checklist** (AI fills these in):
+1. Replace `<TARGET_DOMAIN>` with the actual API domain (e.g., `api-auth.zztfly.com`)
+2. Add `orig_NSURLSession_...` to the orig function pointers section
+3. Add `repl_NSURLSession_...` to the replacement implementations section
+4. Add the swizzle call in `installAllHooks()`
+5. Add `hook_nsurlsession_transport` entry to the JSON config defaults
+
+---
+
+## Mandatory Safety Rules
+
+These rules are derived from real deployment failures. Every generated dylib MUST follow all 7 rules. Missing any one of them will cause a crash, silent failure, or captured ciphertext instead of plaintext.
+
+### Rule 1: Block Copy for id-Typed Completion Parameters (CRITICAL)
+
+When a method signature declares `completion:(id)completion` (NOT `(void (^)(...))completion`), ARC only **retains** the block — it does NOT copy it to the heap. Stack-allocated blocks become invalid after the function returns, causing **SIGSEGV** when the wrapper tries to call them.
+
+**Root cause example**: A service class method takes `completion:(id)completion`. The wrapper captured this without `[completion copy]`. ARC retained the stack block, which was freed when the replacement method returned. Calling it later in the wrapper → SIGSEGV.
+
+**Fix**: Always `[completion copy]` when the parameter type is `id`.
+
+```objc
+// === WRONG — stack block freed after return, wrapper calls garbage ===
+id completion = /* from method parameter */;
+void (^wrapped)(NSDictionary *, NSError *) = ^(NSDictionary *resp, NSError *err) {
+    // ... capture response ...
+    ((void (^)(NSDictionary *, NSError *))completion)(resp, err); // CRASH: stack block gone
+};
+
+// === CORRECT — copy to heap before wrapping ===
+id stackBlock = /* from method parameter */;
+id heapBlock = [stackBlock copy]; // moves to heap, safe to capture
+
+void (^wrapped)(NSDictionary *, NSError *) = ^(NSDictionary *resp, NSError *err) {
+    // ... capture response ...
+    ((void (^)(NSDictionary *, NSError *))heapBlock)(resp, err); // SAFE
+};
+```
+
+**Detection regex**: When reading a class-dump header, if you see `completion:(id)completion` or any block param typed as `id`, apply Rule 1.
+
+**Verification grep** (add to Step 5):
+```bash
+# Every (id) block param in hooked methods must have a corresponding [xxx copy]
+grep -n '(id).*completion\|(id).*block\|(id).*handler' <output>.m
+```
+
+---
+
+### Rule 2: Method Enumeration Before Hooking (MANDATORY)
+
+Public API names in class-dump headers are NOT necessarily the methods called at runtime. A documented public API class method may be **never called** at runtime. The actual working method could be a private method on an internal context/manager singleton, with no public header.
+
+**Root cause**: SDKs commonly expose a public facade class but route internally through context/manager singletons. The public method may be a stub, deprecated, or only called in specific code paths.
+
+**MANDATORY**: Before writing ANY hook code, enumerate the target class's methods using `class_copyMethodList`. Log ALL methods found. Then select the hook target based on actual runtime method names, not the public header.
+
+```objc
+// === MANDATORY: Method enumeration before hooking ===
+static void enumerateClassMethods(Class cls, NSString *tag) {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    [[HKTweakLogger shared] logInfo:@"=== %@: %u instance methods ===", tag, count];
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        [[HKTweakLogger shared] logInfo:@"  [%@] -%@", tag, NSStringFromSelector(sel)];
+    }
+    free(methods);
+
+    // Also enumerate CLASS methods (+)
+    Class meta = object_getClass(cls);
+    Method *classMethods = class_copyMethodList(meta, &count);
+    [[HKTweakLogger shared] logInfo:@"=== %@: %u class methods ===", tag, count];
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(classMethods[i]);
+        [[HKTweakLogger shared] logInfo:@"  [%@] +%@", tag, NSStringFromSelector(sel)];
+    }
+    free(classMethods);
+}
+
+// Call in installAllHooks() BEFORE any swizzling:
+// enumerateClassMethods(NSClassFromString(@"<TargetClass1>"), @"<TargetClass1>");
+// enumerateClassMethods(NSClassFromString(@"<TargetClass2>"), @"<TargetClass2>");
+```
+
+**How to use the enumeration output**:
+1. Look at the logged method list
+2. Find methods whose argument COUNT and TYPES match what you expect (e.g., 3 NSStrings + a completion block)
+3. Hook THAT method, not the one you guessed from the header
+4. If the public API method IS in the list but was never called, it's a dead facade — ignore it
+
+**This is a HARD BLOCKER**: generate-dylib.md Step 5 must verify `class_copyMethodList` appears in the generated code for every target class.
+
+---
+
+### Rule 3: Response Decryption Hook (Anti-Ciphertext)
+
+NSURLSession transport-layer hooks capture HTTP response bodies **as transmitted over the wire**. If the API encrypts responses (common for security SDKs), you get ciphertext like `{"res":"eyJhY2Nlc3NLZXk...base64..."}` — useless without decryption.
+
+**Root cause example**: The API response body is encrypted. NSURLSession captures `{"res":"base64 blob"}`. The plaintext values (`accessKey`, `channel`, etc.) are only available AFTER the SDK's internal decrypt-storage method decrypts and stores them.
+
+**Strategy**: Three-layer capture:
+1. **Transport layer** (NSURLSession) — captures raw bytes, timestamp, URL
+2. **Decrypt/storage layer** — hook the SDK's internal method that stores the DECRYPTED result
+3. **Config layer** — hook `<ConfigClass>` setters for final plaintext values
+
+```objc
+// === Layer 2: Hook the internal decrypt-storage method ===
+// After enumerating instance methods (Rule 2), find methods matching:
+//   set*Cache*, set*Response*, set*Config*, set*Info*, store*, update*
+// These receive the DECRYPTED result.
+
+// Example: <ContextClass> has -set<DecryptStoreMethod>:(NSDictionary *)dict
+// This method receives plaintext {"key1":"...", "key2":"...", ...}
+
+static void (*orig_<ContextClass>_<decryptStoreMethod>)(id self, SEL _cmd, NSDictionary *info);
+
+static void repl_<ContextClass>_<decryptStoreMethod>(id self, SEL _cmd, NSDictionary *info) {
+    @try {
+        if (info) {
+            [[HKTweakLogger shared] logEvent:@"DECRYPTED_RESPONSE"
+                                      detail:[NSString stringWithFormat:@"keys: %@", [info allKeys]]];
+
+            // Save the plaintext response
+            NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                          NSUserDomainMask, YES) firstObject];
+            NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                      withIntermediateDirectories:YES attributes:nil error:nil];
+
+            NSMutableDictionary *saved = [NSMutableDictionary dictionaryWithDictionary:info];
+            saved[@"_captured_at"] = @([[NSDate date] timeIntervalSince1970]);
+            saved[@"_method"] = @"<decryptStoreMethod> (decrypted)";
+
+            NSData *json = [NSJSONSerialization dataWithJSONObject:saved
+                                options:NSJSONWritingPrettyPrinted error:nil];
+            [json writeToFile:[dir stringByAppendingPathComponent:@"decrypted_response.json"]
+                  atomically:YES];
+        }
+    } @catch (NSException *e) {
+        [[HKTweakLogger shared] logEvent:@"DECRYPT_HOOK_ERROR"
+                                  detail:[NSString stringWithFormat:@"%@", e.reason]];
+    }
+
+    if (orig_<ContextClass>_<decryptStoreMethod>) {
+        orig_<ContextClass>_<decryptStoreMethod>(self, _cmd, info);
+    }
+}
+```
+
+**When to add Layer 2**: ALWAYS when NSURLSession transport is enabled. If the response happens to be plaintext, the decrypt hook is harmless (won't trigger). If encrypted, it's essential.
+
+---
+
+### Rule 4: Three-Layer Value Capture (setter + KVC + ivar enumeration)
+
+SDKs may bypass ObjC property setters entirely by writing directly to ivars via `object_setIvar()` or C++ assignment. If all setter hooks are **silent** and KVC polling returns **all null**, the SDK likely writes configuration through a C++ model object that assigns directly to ivars, bypassing ObjC property accessors.
+
+**Three-layer strategy**:
+
+```objc
+// === Layer 1: Hook ObjC property setters (may be bypassed) ===
+// hook -[<ConfigClass> setAccessKey:], -setChannel:, etc.
+// If these fire, you're done. If silent, proceed to Layer 2.
+
+// === Layer 2: KVC polling with delays (may be null if C++ ivars) ===
+// dispatch_after at 2s/5s/10s/20s/40s
+// [[<ConfigClass> instance] valueForKey:@"accessKey"]
+// If values appear, save them. If all null, proceed to Layer 3.
+
+// === Layer 3: Direct ivar enumeration (catches C++-injected values) ===
+static void pollConfigIvars(id instance) {
+    if (!instance) return;
+
+    Class cls = object_getClass(instance);
+    unsigned int ivarCount = 0;
+    Ivar *ivars = class_copyIvarList(cls, &ivarCount);
+
+    [[HKTweakLogger shared] logInfo:@"<ConfigClass> has %u ivars", ivarCount];
+
+    NSMutableDictionary *ivarValues = [NSMutableDictionary dictionary];
+    for (unsigned int i = 0; i < ivarCount; i++) {
+        Ivar ivar = ivars[i];
+        const char *name = ivar_getName(ivar);
+        const char *type = ivar_getTypeEncoding(ivar);
+
+        NSString *nameStr = [NSString stringWithUTF8String:name];
+        NSString *typeStr = [NSString stringWithUTF8String:type];
+
+        id value = nil;
+        // Only read ObjC object ivars (type encoding starts with @)
+        if (type[0] == '@') {
+            value = object_getIvar(instance, ivar);
+        }
+
+        if (value) {
+            ivarValues[nameStr] = [NSString stringWithFormat:@"%@", value];
+        }
+        [[HKTweakLogger shared] logInfo:@"  ivar %s | type=%s | value=%@",
+                                          name, type, value ?: @"(nil/non-ObjC)"];
+    }
+    free(ivars);
+
+    if (ivarValues.count > 0) {
+        // Save ivar values
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                      NSUserDomainMask, YES) firstObject];
+        NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
+
+        ivarValues[@"_captured_at"] = @([[NSDate date] timeIntervalSince1970]);
+        ivarValues[@"_method"] = @"ivar enumeration (Layer 3)";
+
+        NSData *json = [NSJSONSerialization dataWithJSONObject:ivarValues
+                            options:NSJSONWritingPrettyPrinted error:nil];
+        [json writeToFile:[dir stringByAppendingPathComponent:@"ivar_values.json"]
+              atomically:YES];
+    }
+}
+
+// Call Layer 3 from KVC polling with an even longer delay (10s/20s/40s):
+// dispatch_after(..., ^{
+//     id configInstance = /* get <ConfigClass> instance from singleton or init hook */;
+//     pollConfigIvars(configInstance);
+// });
+```
+
+**Note on C++ ivars**: If `type[0]` is NOT `@` (e.g., `{std::string=...}`), the ivar is a C++ object and `object_getIvar` won't work. For C++ ivars like `std::string`, you can try `valueForKey:` which may bridge through the `@property` accessor even if the setter wasn't called.
+
+**When to enable Layer 3**: When class-dump header shows C++ types (`std::string`, pointers, structs) in ivar declarations, OR when Layer 1 (setters) and Layer 2 (KVC) both return nothing after 20+ seconds.
+
+---
+
+### Rule 5: Thread-Safe Completion Handlers
+
+NSURLSession completion handlers execute on **CFNetwork internal threads** — NOT the main thread and NOT a dispatch queue you control. Performing JSON parsing, file I/O, or heavy string formatting on this thread can cause **SIGSEGV** due to thread-safety violations in Foundation/CoreFoundation.
+
+**Root cause example**: The NSURLSession `wrappedCompletion` block called `NSJSONSerialization JSONObjectWithData:` and `writeToFile:atomically:` directly — both triggered intermittent SIGSEGV when the CFNetwork thread state was unexpected.
+
+**Fix**: Block does ONLY lightweight logging. Dispatch heavy work to a background queue.
+
+```objc
+// === WRONG — heavy work on CFNetwork thread ===
+void (^wrappedCompletion)(NSData *, NSURLResponse *, NSError *) =
+    ^(NSData *data, NSURLResponse *response, NSError *error) {
+        // ON CFNetwork THREAD — DANGEROUS
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data ...]; // may SIGSEGV
+        [jsonData writeToFile:path atomically:YES]; // may SIGSEGV
+        NSString *body = [[NSString alloc] initWithData:data ...]; // large alloc
+        // ...
+        if (completionHandler) completionHandler(data, response, error);
+    };
+
+// === CORRECT — dispatch heavy work off CFNetwork thread ===
+static dispatch_queue_t _backgroundQueue = nil; // created in %ctor
+
+void (^wrappedCompletion)(NSData *, NSURLResponse *, NSError *) =
+    ^(NSData *data, NSURLResponse *response, NSError *error) {
+        @try {
+            NSInteger statusCode = [(NSHTTPURLResponse *)response statusCode];
+            NSString *urlStr = response.URL.absoluteString;
+
+            // Only lightweight logging on this thread
+            [[HKTweakLogger shared] logEvent:@"NSURLSession_RESPONSE"
+                                      detail:[NSString stringWithFormat:@"status=%ld url=%@",
+                                                      (long)statusCode, urlStr]];
+        } @catch (NSException *e) {}
+
+        // Retain data so it survives the dispatch
+        NSData *dataCopy = [data copy];
+
+        // Heavy work goes to background queue
+        dispatch_async(_backgroundQueue, ^{
+            @try {
+                if (dataCopy) {
+                    NSError *jsonErr = nil;
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:dataCopy
+                                                options:0 error:&jsonErr];
+                    if (json) {
+                        // File I/O on background queue — safe
+                        NSString *docs = [NSSearchPathForDirectoriesInDomains(
+                                                  NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+                        NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+                        NSString *respPath = [dir stringByAppendingPathComponent:@"transport_response.json"];
+                        NSData *outJson = [NSJSONSerialization dataWithJSONObject:json
+                                            options:NSJSONWritingPrettyPrinted error:nil];
+                        [outJson writeToFile:respPath atomically:YES];
+                    }
+                }
+            } @catch (NSException *e) {}
+        });
+
+        // ALWAYS call original completion on its original thread
+        if (completionHandler) completionHandler(data, response, error);
+    };
+```
+
+**Setup in %ctor**:
+```objc
+_backgroundQueue = dispatch_queue_create("com.hktweak.background", DISPATCH_QUEUE_SERIAL);
+```
+
+---
+
+### Rule 6: Constructor Timing — dispatch_after with Backoff
+
+The dylib's `__attribute__((constructor))` (or `%ctor`) runs during dyld's image loading phase. At this point, embedded frameworks from the host app may NOT have been loaded yet. `NSClassFromString(@"SomeSDKClass")` returns `nil` even though the class will exist 500ms later.
+
+This is already documented in **System 5: Delayed Class Loading** above. Key points reinforced:
+
+1. **Never assume classes exist at %ctor time** — always check with `NSClassFromString`
+2. **Use `dispatch_after` with increasing delays** — 0.5s first retry, then 3.0s for retries 2-10
+3. **Cap retries at 10** — after ~30 seconds, give up and log
+4. **Only swizzle AFTER confirmation** — `hooksInstalled` flag prevents double-install
+
+This rule already exists in the codebase. The enforcement is strengthened: **generate-dylib.md Step 5 must verify `dispatch_after` + `NSClassFromString` retry loop exists when ANY target class is from an embedded framework**.
+
+---
+
+### Rule 7: Singleton Enumeration (+defaultContext / +shared / +defaultInstance)
+
+85%+ of iOS SDKs expose their internal state through a singleton pattern. The singleton holds the live configuration object, which may be populated through paths that bypass setters entirely (C++ assignment, internal ivar writes, deserialization from network).
+
+**Root cause example**: `<ConfigClass>` has a `+[<ConfigClass> defaultContext]` class method that returns the shared instance. The singleton's ivars may be populated by C++ code — setters never called, KVC returns nil initially. Only ivar enumeration (Rule 4) on the singleton instance captures the values.
+
+**Strategy**: After enumerating class methods (Rule 2), scan for singleton accessors:
+
+```objc
+// === Scan class methods for singleton patterns ===
+static id discoverSingleton(Class cls) {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(object_getClass(cls), &count); // class methods
+
+    NSArray *singletonPatterns = @[
+        @"defaultContext", @"shared", @"sharedInstance",
+        @"defaultInstance", @"defaultManager", @"sharedManager",
+        @"current", @"main", @"standard"
+    ];
+
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *selName = NSStringFromSelector(sel);
+
+        for (NSString *pattern in singletonPatterns) {
+            if ([selName rangeOfString:pattern options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                // Check if it returns id (object type)
+                char returnType[256];
+                method_getReturnType(methods[i], returnType, sizeof(returnType));
+                if (returnType[0] == '@') {
+                    // Suppress "may leak" warning — the singleton doesn't need release
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id instance = [cls performSelector:sel];
+#pragma clang diagnostic pop
+                    if (instance) {
+                        [[HKTweakLogger shared] logInfo:@"Found singleton: +[%@ %@] → %@",
+                                                      NSStringFromClass(cls), selName, instance];
+                        free(methods);
+                        return instance;
+                    }
+                }
+            }
+        }
+    }
+    free(methods);
+    return nil;
+}
+
+// Usage:
+// id config = discoverSingleton(NSClassFromString(@"<ConfigClass>"));
+// if (config) {
+//     pollConfigIvars(config);                     // Rule 4: ivar enumeration
+//     // or: [config valueForKey:@"accessKey"];     // Rule 4: KVC polling
+// }
+```
+
+**When to use**: ALWAYS when the target class has no public init hook that fires. The singleton + ivar enumeration is often the ONLY way to capture values.
+
+---
+
 ## Complete Enhanced Tweak.xm Template
 
 The full template that the AI generates, with all six systems wired together:
@@ -956,10 +1459,10 @@ The full template that the AI generates, with all six systems wired together:
 //  Target: <AppName> (<BundleID>)
 //
 //  Log files (in App Documents):
-//    - <TweakName>_hook.log     Hook invocation trace
-//    - <TweakName>_crash.log    Crash/exception reports
-//    - <TweakName>_config.json  Editable hook configuration
-//    - <TweakName>_network.jsonl Network I/O capture
+//    - <TweakName>/hook.log     Hook invocation trace
+//    - <TweakName>/crash.log    Crash/exception reports
+//    - <TweakName>/config.json  Editable hook configuration
+//    - <TweakName>/network.jsonl Network I/O capture
 // ============================================================
 
 #import <substrate.h>
@@ -1078,7 +1581,7 @@ static void setupCrashHandler(NSString *crashLogPath) {
 - (NSString *)ts { return [_df stringFromDate:[NSDate date]]; }
 - (void)writeLine:(NSString *)line {
     // NSLog dual-output for real-time idevicesyslog monitoring
-    NSLog(@"[SOUL_HOOK] %@", line);
+    NSLog(@"[%@] %@", TWEAK_NAME, line);
 
     dispatch_async(_q, ^{
         NSString *s = [NSString stringWithFormat:@"[%@] %@\n", [self ts], line];
@@ -1238,23 +1741,28 @@ static void setupCrashHandler(NSString *crashLogPath) {
     NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     if (!docs) return; // safety: can't proceed without Documents
 
-    // 2. SETUP CRASH HANDLER FIRST — before anything else
-    setupCrashHandler([docs stringByAppendingPathComponent:@TWEAK_NAME "_crash.log"]);
+    // 2. Create subfolder for all output files (avoids cluttering Documents root)
+    NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
 
-    // 3. Setup hook logger
-    [[HKTweakLogger shared] setupWithPath:[docs stringByAppendingPathComponent:@TWEAK_NAME "_hook.log"]];
+    // 3. SETUP CRASH HANDLER FIRST — before anything else
+    setupCrashHandler([dir stringByAppendingPathComponent:@"crash.log"]);
 
-    // 4. Load config (writes defaults on first launch)
-    NSString *configPath = [docs stringByAppendingPathComponent:@TWEAK_NAME "_config.json"];
+    // 4. Setup hook logger
+    [[HKTweakLogger shared] setupWithPath:[dir stringByAppendingPathComponent:@"hook.log"]];
+
+    // 5. Load config (writes defaults on first launch)
+    NSString *configPath = [dir stringByAppendingPathComponent:@"config.json"];
     NSDictionary *defaultConfig = <JSON_CONFIG_PLACEHOLDER>;
     [[HKTweakConfig shared] loadFromPath:configPath defaults:defaultConfig];
 
-    // 5. Setup network capture (only if this tweak hooks network methods)
-    // [[HKTweakNetworkCapture shared] setupWithPath:[docs stringByAppendingPathComponent:@TWEAK_NAME "_network.jsonl"]];
+    // 6. Setup network capture (only if this tweak hooks network methods)
+    // [[HKTweakNetworkCapture shared] setupWithPath:[dir stringByAppendingPathComponent:@"network.jsonl"]];
 
-    [[HKTweakLogger shared] logInfo:@"All systems initialized"];
+    [[HKTweakLogger shared] logInfo:@"All systems initialized — output dir: %@", dir];
 
-    // 6. Check if target classes are available. If in embedded frameworks, retry.
+    // 7. Check if target classes are available. If in embedded frameworks, retry.
     //    tryInstallHooks() polls NSClassFromString with backoff and calls %init on main queue.
     tryInstallHooks();
 }
@@ -1373,21 +1881,23 @@ static void hookClassMethod(Class cls, SEL selector, id block) {
 ### Pure ObjC Hook Example (matching the Logos patterns)
 
 ```objc
-// ---- Replacement for +[FLYEASDK initWithSelfKey:appSecret:] ----
-static void (*orig_FLYEASDK_initWithSelfKey_appSecret)(id self, SEL _cmd, NSString *selfKey, NSString *appSecret);
+// ---- Replacement for +[<TargetClass> <initMethod>:<secretParam>:] ----
+static void (*orig_<TargetClass>_<initMethod>)(id self, SEL _cmd, NSString *key1, NSString *key2);
 
-static void repl_FLYEASDK_initWithSelfKey_appSecret(id self, SEL _cmd, NSString *selfKey, NSString *appSecret) {
+static void repl_<TargetClass>_<initMethod>(id self, SEL _cmd, NSString *key1, NSString *key2) {
     @try {
-        [[HKTweakLogger shared] logHookEnter:@"FLYEASDK"
-                                    selector:@"+initWithSelfKey:appSecret:"
-                                        args:[NSString stringWithFormat:@"selfKey=%@ appSecret=%@", selfKey, appSecret]];
+        [[HKTweakLogger shared] logHookEnter:@"<TargetClass>"
+                                    selector:@"+<initMethod>:<secretParam>:"
+                                        args:[NSString stringWithFormat:@"key1=%@ key2=%@", key1, key2]];
 
-        // Save keys to dedicated JSON file
+        // Save keys to dedicated JSON file (in subfolder)
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        NSString *keysPath = [docs stringByAppendingPathComponent:@TWEAK_NAME "_flyverify_keys.json"];
+        NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *keysPath = [dir stringByAppendingPathComponent:@"captured_keys.json"];
         NSDictionary *keys = @{
-            @"selfKey": selfKey ?: @"",
-            @"appSecret": appSecret ?: @"",
+            @"key1": key1 ?: @"",
+            @"key2": key2 ?: @"",
             @"timestamp": @([[NSDate date] timeIntervalSince1970])
         };
         NSData *json = [NSJSONSerialization dataWithJSONObject:keys
@@ -1399,25 +1909,25 @@ static void repl_FLYEASDK_initWithSelfKey_appSecret(id self, SEL _cmd, NSString 
     }
 
     // ALWAYS call original
-    if (orig_FLYEASDK_initWithSelfKey_appSecret) {
-        orig_FLYEASDK_initWithSelfKey_appSecret(self, _cmd, selfKey, appSecret);
+    if (orig_<TargetClass>_<initMethod>) {
+        orig_<TargetClass>_<initMethod>(self, _cmd, key1, key2);
     }
 }
 
 // ---- Installation with delayed loading ----
-static void installFLYEASDKHook(void) {
-    Class cls = NSClassFromString(@"FLYEASDK");
+static void install<TargetClass>Hook(void) {
+    Class cls = NSClassFromString(@"<TargetClass>");
     if (!cls) return;
 
-    SEL sel = NSSelectorFromString(@"initWithSelfKey:appSecret:");
+    SEL sel = NSSelectorFromString(@"<initMethod>:<secretParam>:");
     Method method = class_getClassMethod(cls, sel);
     if (!method) return;
 
     IMP origImp = method_getImplementation(method);
-    orig_FLYEASDK_initWithSelfKey_appSecret = (void *)origImp;
+    orig_<TargetClass>_<initMethod> = (void *)origImp;
 
-    IMP newImp = imp_implementationWithBlock(^(id self, NSString *selfKey, NSString *appSecret) {
-        repl_FLYEASDK_initWithSelfKey_appSecret(self, sel, selfKey, appSecret);
+    IMP newImp = imp_implementationWithBlock(^(id self, NSString *key1, NSString *key2) {
+        repl_<TargetClass>_<initMethod>(self, sel, key1, key2);
     });
     method_setImplementation(method, newImp);
 }
@@ -1590,11 +2100,11 @@ nm -gU <tweak-dir>/.theos/obj/debug/<TweakName>.dylib
    ```
    /var/mobile/Containers/Data/Application/<App-UUID>/Documents/
    ```
-   Look for:
-   - `<TweakName>_hook.log` — hook invocation trace
-   - `<TweakName>_crash.log` — crash reports (hope this stays empty)
-   - `<TweakName>_config.json` — editable hook configuration
-   - `<TweakName>_network.jsonl` — captured network traffic (if applicable)
+   Look for the `<TweakName>/` subfolder:
+   - `hook.log` — hook invocation trace
+   - `crash.log` — crash reports (hope this stays empty)
+   - `config.json` — editable hook configuration
+   - `network.jsonl` — captured network traffic (if applicable)
 
 ## AI Workflow Summary
 
