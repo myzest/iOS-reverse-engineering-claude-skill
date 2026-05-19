@@ -2,14 +2,14 @@
   "$schema": "https://www.schemastore.org/claude-code-marketplace.json",
   "name": "ios-reverse-engineering",
   "version": "1.0.0",
-  "description": "Extract, analyze, and reverse engineer iOS applications — IPA extraction, class-dump, API endpoint discovery, call flow tracing, security auditing, cloud credential scanning, binary reversing, SDK fingerprinting, and protection detection.",
+  "description": "Extract, analyze, and reverse engineer iOS applications — IPA extraction, class-dump, API endpoint discovery, call flow tracing, security auditing, cloud credential scanning, binary reversing, SDK fingerprinting, protection detection, and dylib injection plugin generation for TrollFools.",
   "owner": {
     "name": "zest"
   },
   "plugins": [
     {
       "name": "ios-reverse-engineering",
-      "description": "Extract and analyze iOS IPA, .app bundles, Mach-O binaries, .dylib, and .framework files using ipsw, otool, strings, radare2/rizin, and Ghidra headless. Reverse engineer iOS apps, extract HTTP API endpoints (URLSession, Alamofire, Moya, AFNetworking, GraphQL, WebSocket), trace call flows from ViewControllers to network layer, analyze security patterns (ATS, cert pinning, keychain, jailbreak detection), deep-scan for cloud credentials (Firebase, AWS, GCP, Azure, Stripe), perform LLM-assisted binary reversing analysis with Ghidra scripts, fingerprint embedded third-party SDKs with CVE checking, and detect anti-tampering protections (obfuscation, anti-debug, dylib injection prevention, integrity checks).",
+      "description": "Extract and analyze iOS IPA, .app bundles, Mach-O binaries, .dylib, and .framework files using ipsw, otool, strings, radare2/rizin, and Ghidra headless. Reverse engineer iOS apps, extract HTTP API endpoints, trace call flows, analyze security patterns, deep-scan for cloud credentials, perform LLM-assisted binary reversing, fingerprint SDKs with CVE checking, detect anti-tampering protections, and generate Logos/Theos dylib injection plugins for TrollFools deployment.",
       "source": "./",
       "category": "security",
       "version": "1.0.0",
@@ -29,10 +29,19 @@
         "jailbreak-detection",
         "anti-tampering",
         "swift",
-        "objective-c"
+        "objective-c",
+        "dylib",
+        "theos",
+        "logos",
+        "trollfools",
+        "tweak",
+        "hook",
+        "injection"
       ],
       "commands": [
-        "./commands/extract-ipa.md"
+        "./commands/extract-ipa.md",
+        "./commands/extract-protocol.md",
+        "./commands/generate-dylib.md"
       ],
       "skills": [
         "./skills/ios-reverse-engineering"
