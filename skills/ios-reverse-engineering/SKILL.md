@@ -474,6 +474,64 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/detect-protect
 
 See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/anti-tampering-patterns.md` for the full reference on protection patterns and detection techniques.
 
+### Phase 11: Communication Protocol Extraction
+
+Extract and document the app's underlying communication protocol — the wire format, message framing, serialization, authentication state machine, and session lifecycle. This phase produces an **AI-friendly protocol specification** designed for LLMs to read and generate client SDK wrapper code.
+
+**Action**: Run the protocol extraction script:
+
+```bash
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --report protocol-spec.md
+```
+
+This script detects and documents:
+- **Transport layer** — HTTP/HTTPS, WebSocket, gRPC, custom TCP/UDP sockets, MQTT
+- **Serialization format** — JSON, Protocol Buffers, MessagePack, custom binary
+- **Message framing** — Length-prefixed, delimiter-based, fixed-size, TLV
+- **HTTP/REST protocol details** — base URLs, methods, headers, error format, pagination, rate limiting
+- **WebSocket protocol** — connection, message routing by event type, heartbeat/ping-pong, reconnection
+- **gRPC/Protobuf** — service methods, message definitions, field accessors
+- **Custom socket protocol** — connection params, I/O patterns, TLS, framing constants
+- **Authentication state machine** — login flow, token acquisition/storage/refresh, auth header injection
+- **Session lifecycle** — connection states, retry/backoff strategy, timeout configuration
+- **SDK implementation guidance** — recommended libraries, serialization, thread safety, error handling, reconnection
+
+The report is written **incrementally** — each section is appended to the file as it's discovered, so you can read partial results during analysis.
+
+**Targeted analysis:**
+
+```bash
+# HTTP/REST protocol only
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --report http-protocol.md
+
+# WebSocket protocol only
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --websocket --report ws-protocol.md
+
+# gRPC / Protobuf only
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --grpc --report grpc-protocol.md
+
+# Custom socket protocol only
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --socket --report socket-protocol.md
+
+# Authentication flow only
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --auth --report auth-flow.md
+
+# HTTP + Auth (most common need)
+bash ${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/scripts/extract-protocol.sh <output>/ --http --auth --report api-spec.md
+```
+
+**LLM Analysis**: After the protocol extraction completes, read the generated report and enhance it:
+
+1. **Transport Layer** — Verify the detected transports. Check if the app uses multiple transports (e.g., HTTP for API + WebSocket for real-time).
+2. **Message Catalog** — For each detected message type, extract the full schema from class-dump headers and strings. Write example payloads.
+3. **Auth State Machine** — Trace the complete login → token → refresh → logout flow. Note edge cases (offline, 401, rate limited).
+4. **Wire Format** — If a custom binary protocol is detected, analyze the framing constants and reconstruct the header structure.
+5. **SDK Guidance** — Based on all findings, write concrete SDK implementation notes: which Swift types to use, how to handle threading, what reconnection strategy to implement.
+
+**The generated protocol-spec.md is an AI-training document.** Feed it to an LLM with the prompt: "Write a Swift client SDK that implements this communication protocol." The LLM should be able to generate a working SDK from the specification alone.
+
+See `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/protocol-extraction-guide.md` for detailed protocol detection techniques, message format reverse engineering, and SDK generation guidance.
+
 ## Output
 
 At the end of the workflow, deliver:
@@ -487,8 +545,9 @@ At the end of the workflow, deliver:
 7. **Deep binary analysis** — decompiled functions, cross-references, crypto analysis, data flow findings (Phase 8)
 8. **SDK inventory** — all third-party SDKs identified, with versions, categories, CVE matches, and risk assessment (Phase 9)
 9. **Protection assessment** — anti-tampering mechanisms, obfuscation, anti-debug, injection prevention, with protection score (Phase 10)
+10. **Protocol specification** — AI-friendly communication protocol document covering transport, serialization, auth state machine, message catalog, session lifecycle, and SDK implementation guidance (Phase 11)
 
-Use `--report report.md` on find-api-calls.sh, deep-secret-scan.sh, detect-sdks.sh, and detect-protections.sh to generate structured Markdown reports automatically.
+Use `--report report.md` on find-api-calls.sh, deep-secret-scan.sh, detect-sdks.sh, detect-protections.sh, and extract-protocol.sh to generate structured Markdown reports automatically.
 
 ## References
 
@@ -500,3 +559,4 @@ Use `--report report.md` on find-api-calls.sh, deep-secret-scan.sh, detect-sdks.
 - `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/reversing-tools-guide.md` — CLI reversing tools reference (radare2, rizin, Ghidra headless)
 - `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/sdk-fingerprinting.md` — SDK fingerprint database, class prefixes, version extraction, and CVE reference
 - `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/anti-tampering-patterns.md` — Anti-tampering, obfuscation, anti-debug, and injection prevention patterns
+- `${CLAUDE_PLUGIN_ROOT}/skills/ios-reverse-engineering/references/protocol-extraction-guide.md` — Communication protocol extraction, AI-friendly spec format, and SDK generation guidance
