@@ -116,6 +116,7 @@ Use this table to decide which built-in systems to include. Do NOT blindly inclu
 | Enumeration (class_copyMethodList) | ALWAYS for every target class (Rule 2 — MANDATORY) | Must appear in generated code; verified in Step 5 |
 | Decrypt Hook | NSURLSession transport enabled AND API encrypts responses | After enumerating SDK context class methods, look for `set*Cache*`/`set*Response*`/`set*Config*` |
 | Ivar Enumeration (Layer 3) | Setters + KVC both return nothing after 20+ seconds | Read .h for C++ types OR user reports "setter hooks silent, KVC all null" |
+| Getter Polling (C++ ivar bypass) | Class-dump shows `@property` + C++ struct ivar (e.g., `std::string` in `_cppModel`), setters expected to be silent | Read .h for C++ types in ivar + matching `@property` names. Only enable if setter hooks confirmed silent after first deploy |
 | Singleton Discovery | Target class has `+defaultContext`/`+shared`/`+sharedInstance`/`+defaultManager` in class-dump | Read .h for class methods matching singleton patterns |
 
 **Decision logic**:
@@ -124,7 +125,7 @@ Use this table to decide which built-in systems to include. Do NOT blindly inclu
 2. IF completion: block in hooked method → Block Wrapping (+ Network Capture if SPEC mentions network)
 3. IF class in embedded framework → Delayed Loading
 4. IF user requests "capture all HTTP" → NSURLSession Transport → also enable Decrypt Hook + Ivar Enumeration
-5. IF class-dump shows C++ ivars → KVC Polling (Layer 2). Ivar Enumeration (Layer 3) is a RUNTIME FALLBACK — only enable AFTER Layer 1 (setter hooks) AND Layer 2 (KVC on captured instances) both return nothing for 20+ seconds. Do NOT add Layer 3 at generation time based solely on static C++ ivar detection.
+5. IF class-dump shows C++ ivars with matching ObjC @property → KVC Polling (Layer 2) + Getter Polling (hook -init, capture instance, valueForKey: after delay). Ivar Enumeration (Layer 3) is a RUNTIME FALLBACK — only enable AFTER Layer 1 (setter hooks) AND Layer 2 (KVC on captured instances) both return nothing for 20+ seconds. Do NOT add Layer 3 at generation time based solely on static C++ ivar detection.
 6. IF class-dump shows +defaultContext/+shared/etc → Singleton Discovery
 ```
 
@@ -396,6 +397,7 @@ Before writing files, verify:
 30. **Singleton class methods enumerated** — after `class_copyMethodList`, scan for `defaultContext`/`shared`/`sharedInstance`/`defaultManager`/`defaultInstance` patterns. Use the singleton for KVC reads and ivar enumeration. Verify: grep for `defaultContext\|singleton\|sharedInstance` in `<output>.m`.
 31. **`object_getIvar` MUST be guarded by type-encoding check** — every `object_getIvar` call MUST be preceded by `ivar_getTypeEncoding` + `type[0] == '@'` check. `@try/@catch` only catches ObjC exceptions, NOT SIGSEGV from reading non-object ivars (C++ structs, `std::string`, primitives). Verify: if `object_getIvar` exists in `<output>.m`, then `grep -c 'ivar_getTypeEncoding'` >= 1 AND `grep -c "type\[0\] == '@'"` >= 1.
 32. **KVC-read objects MUST be type-verified before ivar enumeration** — any object obtained via `valueForKey:` that is passed to ivar enumeration MUST first be verified with `isKindOfClass:` against the expected target class. Properties like `configureInfo` may return `NSDictionary *`, not `<TargetClass> *`. Passing a class-cluster object (NSDictionary, NSArray) to ivar enumeration risks SIGSEGV. Verify: if `class_copyIvarList` exists in `<output>.m`, then there MUST be `isKindOfClass:` verification on the object passed to it.
+33. **Every value-capture hook MUST save to file (Rule 8)** — hooks that log captured values via `logHookEnter` or `logInfo` MUST also call `saveJSONToTmp` and/or `writeToFile:atomically:`. Logging alone is NOT sufficient — the user needs structured JSON output files. Verify: `grep -c 'saveJSONToTmp\|writeToFile:' <output>.m` must be >= 1 for every non-trivial hook target. Hooks that only do `return` or `%orig` pass-through without capturing values are exempt.
 
 **Count verification**:
 ```bash
@@ -432,6 +434,10 @@ grep -c "type\[0\] == '@'" <tweak-dir>/<TweakName>.m
 # If class_copyIvarList exists, isKindOfClass: MUST also exist
 grep -c 'class_copyIvarList' <tweak-dir>/<TweakName>.m
 grep -c 'isKindOfClass:' <tweak-dir>/<TweakName>.m
+
+# Every value-capture hook MUST save to file (Rule 8)
+# If logHookEnter count > 0, saveJSONToTmp/writeToFile count should be >= number of value-capture hooks
+grep -c 'saveJSONToTmp\|writeToFile:atomically:' <tweak-dir>/<TweakName>.m
 ```
 
 **If HKTweakConfig grep returns 0**: The generation is INCOMPLETE. Add the full HKTweakConfig class from the reference guide template and re-verify. Do not proceed to build.
@@ -445,6 +451,8 @@ grep -c 'isKindOfClass:' <tweak-dir>/<TweakName>.m
 **If object_getIvar exists but ivar_getTypeEncoding or `type[0] == '@'` guard is missing**: BLOCK. Rule 31 — `@try/@catch` cannot catch SIGSEGV from non-object ivars. Add the type-encoding guard from the reference guide template.
 
 **If class_copyIvarList exists but isKindOfClass: does not**: BLOCK. Rule 32 — KVC-read objects must be type-verified before ivar enumeration. Add `[obj isKindOfClass:[ExpectedClass class]]` verification on the instance passed to ivar enumeration.
+
+**If saveJSONToTmp/writeToFile count is 0 but hooks capture values**: BLOCK. Rule 8 — Every value-capture hook MUST save to a structured output file. Logging alone is not enough; the user cannot find captured values in the hook log. Add `saveJSONToTmp(@"<name>.json", dict)` to every `repl_` function that captures values.
 
 **Common pitfall — Swift classes in ObjC runtime**:
 Swift classes bridged to ObjC use a module prefix: `_TtC<ModuleLength><Module><ClassLength><Class>`. The class-dump output shows the ObjC-facing name. Use that exact name in `%hook`.

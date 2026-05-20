@@ -1501,6 +1501,180 @@ static id discoverSingleton(Class cls) {
 
 ---
 
+### Rule 8: Every Value-Capture Hook MUST Save to File (LOGGING ALONE IS NOT ENOUGH)
+
+Hooks that capture values (credentials, config, API responses) MUST write those values to a persistent JSON file. Logging alone is NOT sufficient — the user needs structured, accessible output they can find without scanning the entire hook log.
+
+**Root cause example**: A `-[FlyVerifyContext setSdkVerifyAppKey:]` hook logged `key=3bc088963b509` to hook.log but never called `saveJSONToTmp` or wrote to a JSON file. The hook fired successfully, the value appeared in hook.log, but the user found no structured output file — `soul_flyverify_keys.json` was missing — making the dylib appear broken.
+
+**Fix pattern**: Every `repl_` function that captures a value MUST:
+1. Call `saveJSONToTmp(@"<name>.json", dict)` to write to `/tmp/`
+2. Also write to `Documents/<TweakName>/<name>.json` as backup
+
+```objc
+// === WRONG — logs but doesn't save, user has no structured output ===
+static void repl_Foo_setSecret(id self, SEL _cmd, id secret) {
+    @try {
+        [[HKTweakLogger shared] logHookEnter:@"Foo" selector:@"-setSecret:" args:secret];
+        [[HKTweakLogger shared] logInfo:@"[Foo setSecret:] = %@", secret];
+        // MISSING: saveJSONToTmp / writeToFile — value is LOST to user
+    } @catch (NSException *e) {}
+    if (orig_Foo_setSecret) orig_Foo_setSecret(self, _cmd, secret);
+}
+
+// === CORRECT — captures AND saves ===
+static void repl_Foo_setSecret(id self, SEL _cmd, id secret) {
+    @try {
+        [[HKTweakLogger shared] logHookEnter:@"Foo" selector:@"-setSecret:" args:secret];
+        [[HKTweakLogger shared] logInfo:@"[Foo setSecret:] = %@", secret];
+
+        // MUST save to structured output file
+        NSDictionary *dict = @{
+            @"secret": secret ?: @"",
+            @"timestamp": @([[NSDate date] timeIntervalSince1970])
+        };
+        saveJSONToTmp(@"captured_secret.json", dict);
+
+        // ALSO save to Documents subfolder
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                      NSUserDomainMask, YES) firstObject];
+        NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
+        NSData *json = [NSJSONSerialization dataWithJSONObject:dict
+                            options:NSJSONWritingPrettyPrinted error:nil];
+        [json writeToFile:[dir stringByAppendingPathComponent:@"captured_secret.json"]
+               atomically:YES];
+    } @catch (NSException *e) {}
+    if (orig_Foo_setSecret) orig_Foo_setSecret(self, _cmd, secret);
+}
+```
+
+**Detection check**: In `generate-dylib.md` Step 5, verify:
+```bash
+# Every repl_ function that calls logHookEnter should also save to file
+# Count saveJSONToTmp or writeToFile: calls — should be >= number of value-capture hooks
+grep -c 'saveJSONToTmp\|writeToFile:atomically:' <output>.m
+```
+
+**Why both /tmp/ and Documents?** Documents requires knowing the app UUID. /tmp is always at `/tmp/` and accessible via any file manager immediately. If Documents fails (sandbox change), /tmp is the fallback.
+
+---
+
+### Rule 9: Getter Polling for C++ Ivar-Backed ObjC Properties
+
+When class-dump shows a C++ struct ivar (e.g., `struct AppConfig { std::string accessKey; ... } _cppModel;`) with matching ObjC `@property` declarations, the ObjC **setters are never called**. The values are assigned directly to the C++ struct, bypassing ObjC property accessors entirely.
+
+However, the ObjC **getters DO work** — they read from the C++ struct and bridge the value (e.g., `std::string` → `NSString *`).
+
+**Diagnosis**: Setter hooks are all silent (no [HOOK:ENTER] lines), but `valueForKey:` on the instance returns correct values.
+
+**Fix pattern**:
+1. Hook `-[ClassName init]` to capture the instance after initialization
+2. `dispatch_after` 2-5 seconds
+3. Poll getters via `[instance valueForKey:@"accessKey"]` etc.
+4. Save all captured values to a JSON file
+
+```objc
+// === Step 1: Hook init to capture instance ===
+static id (*orig_ConfigClass_init)(id self, SEL _cmd);
+
+static id repl_ConfigClass_init(id self, SEL _cmd) {
+    id instance = orig_ConfigClass_init ? orig_ConfigClass_init(self, _cmd) : nil;
+
+    @try {
+        if (instance) {
+            [[HKTweakLogger shared] logInfo:@"[ConfigClass init] instance captured"];
+            pollConfigGetters(instance); // schedules delayed getter poll
+        }
+    } @catch (NSException *e) {}
+
+    return instance;
+}
+
+// === Step 2: Delayed getter polling ===
+static void pollConfigGetters(id instance) {
+    if (!instance) return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            NSMutableDictionary *values = [NSMutableDictionary dictionary];
+            NSArray *keys = @[@"accessKey", @"channel", @"deviceType", @"appID"];
+
+            for (NSString *key in keys) {
+                id value = [instance valueForKey:key];
+                if (value && ![value isKindOfClass:[NSNull class]]) {
+                    values[key] = value;
+                    [[HKTweakLogger shared] logInfo:@"[GETTER] %@ = %@", key, value];
+                }
+            }
+
+            if (values.count > 0) {
+                NSMutableDictionary *saved = [values mutableCopy];
+                saved[@"_captured_at"] = @([[NSDate date] timeIntervalSince1970]);
+                saveJSONToTmp(@"config_getters.json", saved);
+
+                NSString *docs = [NSSearchPathForDirectoriesInDomains(
+                                          NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+                NSString *dir = [docs stringByAppendingPathComponent:@TWEAK_NAME];
+                [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                          withIntermediateDirectories:YES attributes:nil error:nil];
+                NSData *json = [NSJSONSerialization dataWithJSONObject:saved
+                                    options:NSJSONWritingPrettyPrinted error:nil];
+                [json writeToFile:[dir stringByAppendingPathComponent:@"config_getters.json"]
+                      atomically:YES];
+
+                [[HKTweakLogger shared] logInfo:@"Getter poll saved (%lu fields)",
+                 (unsigned long)values.count];
+            } else {
+                [[HKTweakLogger shared] logInfo:@"[GETTER] All values nil at t+3s"];
+            }
+        } @catch (NSException *e) {
+            [[HKTweakLogger shared] logEvent:@"GETTER_POLL_ERROR" detail:e.reason];
+        }
+    });
+}
+```
+
+**When to apply**: When all three conditions are true:
+1. Class-dump shows C++ types in ivar declarations (e.g., `std::string`, `std::vector`)
+2. ObjC `@property` declarations exist with matching names
+3. Setter hooks are completely silent after deployment
+
+**Distinction from Ivar Enumeration (Rule 4 Layer 3)**: Getter polling uses `valueForKey:` (safe, always works for ObjC properties) rather than `object_getIvar` (unsafe, cannot read C++ types). Getter polling should be tried BEFORE ivar enumeration.
+
+---
+
+### Paired Setter Accumulator Pattern
+
+When two related values arrive through separate setter calls (e.g., `-setSdkVerifyAppKey:` then `-setSdkVerifyAppSecret:`), accumulate them in `static` variables and save the combined dictionary each time either setter fires. The last call will save the complete pair.
+
+```objc
+// File-level static accumulators
+static NSString *_accumAppKey = nil;
+static NSString *_accumAppSecret = nil;
+
+static void repl_Foo_setAppKey(id self, SEL _cmd, id key) {
+    @try {
+        _accumAppKey = key;
+        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+        if (_accumAppKey) dict[@"appKey"] = _accumAppKey;
+        if (_accumAppSecret) dict[@"appSecret"] = _accumAppSecret;
+        dict[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+        saveJSONToTmp(@"paired_keys.json", dict);
+        // ... also save to Documents ...
+    } @catch (NSException *e) {}
+    if (orig_Foo_setAppKey) orig_Foo_setAppKey(self, _cmd, key);
+}
+
+// setAppSecret repl_ uses the SAME static variables — saves combined dict
+```
+
+**Why this works**: Both setters fire in sequence during initialization. By accumulating in statics and saving from either, the file always has the latest known state of both values.
+
+---
+
 ## Complete Enhanced Tweak.xm Template
 
 The full template that the AI generates, with all six systems wired together:
