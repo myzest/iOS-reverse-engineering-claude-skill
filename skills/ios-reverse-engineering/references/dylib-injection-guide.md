@@ -1238,8 +1238,22 @@ SDKs may bypass ObjC property setters entirely by writing directly to ivars via 
 // If values appear, save them. If all null, proceed to Layer 3.
 
 // === Layer 3: Direct ivar enumeration (catches C++-injected values) ===
+// CRITICAL: This is a RUNTIME FALLBACK only. Do NOT add at generation time
+// based solely on static C++ ivar detection. Only enable after Layer 1 (setter
+// hooks) AND Layer 2 (KVC) both return nothing for 20+ seconds.
+// CRITICAL: The instance passed to this function MUST be type-verified with
+// isKindOfClass: BEFORE calling. Passing an NSDictionary or other class-cluster
+// object to ivar enumeration can cause SIGSEGV.
 static void pollConfigIvars(id instance) {
     if (!instance) return;
+
+    // CRITICAL: Verify instance type before ivar enumeration
+    Class expectedCls = NSClassFromString(@"<TargetClass>");
+    if (![instance isKindOfClass:expectedCls]) {
+        [[HKTweakLogger shared] logInfo:@"[WARN] KVC returned %@, expected %@ — skipping ivar enumeration",
+         NSStringFromClass([instance class]), NSStringFromClass(expectedCls)];
+        return;
+    }
 
     Class cls = object_getClass(instance);
     unsigned int ivarCount = 0;
@@ -1257,7 +1271,9 @@ static void pollConfigIvars(id instance) {
         NSString *typeStr = [NSString stringWithUTF8String:type];
 
         id value = nil;
-        // Only read ObjC object ivars (type encoding starts with @)
+        // CRITICAL: Only read ObjC object ivars (type encoding starts with @).
+        // NEVER use @try/@catch as a substitute for this check — @try/@catch
+        // cannot catch SIGSEGV from reading non-object ivars (C++ structs, std::string, primitives).
         if (type[0] == '@') {
             value = object_getIvar(instance, ivar);
         }
@@ -1288,16 +1304,53 @@ static void pollConfigIvars(id instance) {
     }
 }
 
-// Call Layer 3 from KVC polling with an even longer delay (10s/20s/40s):
-// dispatch_after(..., ^{
-//     id configInstance = /* get <ConfigClass> instance from singleton or init hook */;
-//     pollConfigIvars(configInstance);
-// });
+// ================================================================
+// Layer 3 Instance Acquisition — Three Safe Patterns
+// ================================================================
+// DO NOT guess instance locations via unrelated KVC properties.
+// Use one of these concrete patterns:
+
+// Pattern A (RECOMMENDED): Capture instance from setter hook
+// In the -[<TargetClass> setXxx:] repl_ function, save self to a static weak ref.
+// ```
+// static __weak id _captured<ConfigClass>Instance = nil;
+// static void repl_<TargetClass>_setXxx(id self, SEL _cmd, id val) {
+//     _captured<ConfigClass>Instance = self;  // safe: only stores valid instances
+//     if (orig_<TargetClass>_setXxx) orig_<TargetClass>_setXxx(self, _cmd, val);
+// }
+// ```
+// Then in KVC polling, use _captured<ConfigClass>Instance (check non-nil before use).
+
+// Pattern B: Use a KNOWN singleton accessor
+// Only if the class header explicitly declares a singleton method:
+// + (id)defaultContext;  or  + (instancetype)shared;
+// ```
+// id instance = [<TargetClass> performSelector:@selector(defaultContext)];
+// if (instance && [instance isKindOfClass:[<TargetClass> class]]) {
+//     pollConfigIvars(instance);
+// }
+// ```
+
+// Pattern C: Capture from your OWN init/config hook (most reliable)
+// If you already hook a method that receives or creates the config instance:
+// ```
+// static void repl_<SDKClass>_initWithConfig:(id)config {
+//     if (config && [config isKindOfClass:[<TargetClass> class]]) {
+//         pollConfigIvars(config);
+//     }
+//     // ... call orig ...
+// }
+// ```
+
+// WARNING: Never pass objects from unrelated KVC reads to pollConfigIvars.
+// Example of WRONG usage:
+//   id configInfo = [someOtherContext valueForKey:@"configureInfo"]; // NSDictionary!
+//   pollConfigIvars(configInfo); // CRASH — NSDictionary is not <TargetClass>
 ```
 
 **Note on C++ ivars**: If `type[0]` is NOT `@` (e.g., `{std::string=...}`), the ivar is a C++ object and `object_getIvar` won't work. For C++ ivars like `std::string`, you can try `valueForKey:` which may bridge through the `@property` accessor even if the setter wasn't called.
 
-**When to enable Layer 3**: When class-dump header shows C++ types (`std::string`, pointers, structs) in ivar declarations, OR when Layer 1 (setters) and Layer 2 (KVC) both return nothing after 20+ seconds.
+**When to enable Layer 3**: ONLY when Layer 1 (setter hooks) AND Layer 2 (KVC on captured instances) both return nothing after 20+ seconds. Do NOT enable Layer 3 at code-generation time based solely on static C++ ivar detection in class-dump headers. The C++ ivar presence is a SIGNAL that Layer 3 MAY be needed at runtime — not a trigger to add it during generation.
 
 ---
 

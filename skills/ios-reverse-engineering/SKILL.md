@@ -529,8 +529,8 @@ Every generated tweak includes six integrated systems that write to the app's Do
 | Block Wrapping (Rule 1) | (internal) | Intercepts completion blocks; enforces [completion copy] | When method has completion: param |
 | NSURLSession Transport (Rule 5) | `<Tweak>/transport_response.json` | Transport-layer HTTP interception | User explicitly requests |
 | Decrypt Hook (Rule 3) | `<Tweak>/decrypted_response.json` | Hooks SDK decrypt-storage method | NSURLSession + encrypted responses |
-| KVC Polling | `<Tweak>/kvc_config.json` | valueForKey: polling with delays | C++ ivars or non-setter paths |
-| Ivar Enumeration (Rule 4) | `<Tweak>/ivar_values.json` | class_copyIvarList + object_getIvar | Setters + KVC both fail |
+| KVC Polling (Layer 2) | `<Tweak>/kvc_config.json` | valueForKey: polling on captured instances with delays (2s/5s/10s/20s/40s) | Layer 1 setters silent for 5+ seconds |
+| Ivar Enumeration (Layer 3) (Rule 4) | `<Tweak>/ivar_values.json` | class_copyIvarList + object_getIvar with type-encoding guard (RUNTIME FALLBACK ONLY) | Layer 1 AND Layer 2 both fail for 20+ seconds. Do NOT add at generation time based on static C++ ivar detection. |
 | Singleton Discovery (Rule 7) | (internal) | Scans for +defaultContext/+shared patterns | Class has singleton class methods |
 
 **Prerequisites**: Theos is optional for building. If not installed, the AI generates the project ready to build:
@@ -627,6 +627,8 @@ Match the log evidence against this classification table:
 | Intermittent SIGSEGV during JSON parse or writeToFile in completion block | Heavy Foundation work on CFNetwork internal thread | Missing dispatch_async to background queue in NSURLSession wrapped completion (Rule 5) |
 | "Target class not loaded" after 10 retries but class definitely exists | Constructor runs before embedded framework dyld loads | Retry delay too short or max retries too low — increase to 15 retries with 5s interval (Rule 6) |
 | KVC polling finds values but setters never triggered | Singleton populated via C++ code, not through ObjC setter path | Missing +defaultContext/+shared singleton discovery for KVC reads (Rule 7) |
+| SIGSEGV at t+5s/t+10s in `pollConfigIvars` / `enumerateIvarsForInstance` block | Ivar enumeration called on wrong object type (e.g., NSDictionary from `configureInfo` KVC, not target class instance) | 1) Missing `isKindOfClass:` verification on KVC-read object before ivar enumeration (Rule 32). 2) Layer 3 added at generation time based on static C++ ivar detection instead of waiting for Layer 1+2 runtime failure. 3) `object_getIvar` not guarded by `ivar_getTypeEncoding` + `type[0] == '@'` check (Rule 31). |
+| SIGSEGV in `object_getIvar` with non-object ivar | `@try/@catch` used instead of type-encoding check — @try/@catch cannot catch SIGSEGV from reading C++ struct/primitive ivars | Missing `ivar_getTypeEncoding` + `type[0] == '@'` guard before `object_getIvar` (Rule 31) |
 
 #### Step 3: Fix the Skill Files (NOT just the dylib)
 

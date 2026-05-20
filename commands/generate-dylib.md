@@ -124,7 +124,7 @@ Use this table to decide which built-in systems to include. Do NOT blindly inclu
 2. IF completion: block in hooked method → Block Wrapping (+ Network Capture if SPEC mentions network)
 3. IF class in embedded framework → Delayed Loading
 4. IF user requests "capture all HTTP" → NSURLSession Transport → also enable Decrypt Hook + Ivar Enumeration
-5. IF class-dump shows C++ ivars → KVC Polling + Ivar Enumeration
+5. IF class-dump shows C++ ivars → KVC Polling (Layer 2). Ivar Enumeration (Layer 3) is a RUNTIME FALLBACK — only enable AFTER Layer 1 (setter hooks) AND Layer 2 (KVC on captured instances) both return nothing for 20+ seconds. Do NOT add Layer 3 at generation time based solely on static C++ ivar detection.
 6. IF class-dump shows +defaultContext/+shared/etc → Singleton Discovery
 ```
 
@@ -390,10 +390,12 @@ Before writing files, verify:
 24. **Every `id`-typed block param has `[completion copy]`** — when a hooked method's completion/block parameter is typed as `id` (NOT `void (^)(...)`), the generated code MUST call `[completion copy]` before wrapping. Stack blocks will be freed after the method returns, causing SIGSEGV. Verify with: `grep -n '(id).*completion\|(id).*block' <output>.m` — every match must have a corresponding `[xxx copy]` nearby.
 25. **`class_copyMethodList` run on EVERY target class** — this is a HARD BLOCKER. Every generated dylib MUST enumerate methods for each target class before hooking. The hook targets the ACTUAL runtime method name, not the public API name guessed from class-dump. Verify: `grep -c 'class_copyMethodList' <output>.m` must be >= number of target classes.
 26. **Decrypt/response-storage hook present when transport layer enabled** — NSURLSession alone captures ciphertext. Must also enumerate instance methods on the SDK context class for `set*Cache*`/`set*Response*`/`set*Config*` and hook the decrypt-storage method. Verify: if NSURLSession hook exists, grep for `setConfigureInfoMemeryCache\|decrypt\|plaintext` or ivar enumeration on context class.
-27. **Ivar enumeration added as Layer 3 fallback** — when class-dump shows C++ ivar types (`std::string`, etc.), add `class_copyIvarList` + `object_getIvar` polling. This catches values set via C++ assignment that bypass ObjC setters AND KVC. Verify: grep for `class_copyIvarList` in `<output>.m`.
+27. **Ivar enumeration added as Layer 3 RUNTIME FALLBACK** — only after Layer 1 (setter hooks) AND Layer 2 (KVC) both return nothing for 20+ seconds. When ivar enumeration IS active, every `object_getIvar` call MUST be guarded by `ivar_getTypeEncoding` + `type[0] == '@'` check. **CRITICAL: `@try/@catch` CANNOT catch SIGSEGV from non-object ivars — never use @try/@catch as a substitute for type-encoding check.** Verify: grep for `class_copyIvarList` in `<output>.m`. If present, grep for `ivar_getTypeEncoding` AND `type[0] == '@'` — both MUST be >= 1.
 28. **NSURLSession completion dispatches heavy work** — `dispatch_async(background_queue, ^{ JSON parse / file write })` MUST be used inside the wrapped NSURLSession completion. Heavy work on the CFNetwork internal thread causes intermittent SIGSEGV. Verify: grep for `dispatch_async.*background.*queue` near `wrappedCompletion`.
 29. **Constructor uses dispatch_after + backoff** — never assume classes exist at `%ctor` time. Must use `NSClassFromString` check + `dispatch_after` with increasing delays (0.5s first, 3.0s subsequent, max 10 retries). Verify: grep for `dispatch_after` and `NSClassFromString` in constructor section.
 30. **Singleton class methods enumerated** — after `class_copyMethodList`, scan for `defaultContext`/`shared`/`sharedInstance`/`defaultManager`/`defaultInstance` patterns. Use the singleton for KVC reads and ivar enumeration. Verify: grep for `defaultContext\|singleton\|sharedInstance` in `<output>.m`.
+31. **`object_getIvar` MUST be guarded by type-encoding check** — every `object_getIvar` call MUST be preceded by `ivar_getTypeEncoding` + `type[0] == '@'` check. `@try/@catch` only catches ObjC exceptions, NOT SIGSEGV from reading non-object ivars (C++ structs, `std::string`, primitives). Verify: if `object_getIvar` exists in `<output>.m`, then `grep -c 'ivar_getTypeEncoding'` >= 1 AND `grep -c "type\[0\] == '@'"` >= 1.
+32. **KVC-read objects MUST be type-verified before ivar enumeration** — any object obtained via `valueForKey:` that is passed to ivar enumeration MUST first be verified with `isKindOfClass:` against the expected target class. Properties like `configureInfo` may return `NSDictionary *`, not `<TargetClass> *`. Passing a class-cluster object (NSDictionary, NSArray) to ivar enumeration risks SIGSEGV. Verify: if `class_copyIvarList` exists in `<output>.m`, then there MUST be `isKindOfClass:` verification on the object passed to it.
 
 **Count verification**:
 ```bash
@@ -421,6 +423,15 @@ grep -c 'dispatch_async.*background' <tweak-dir>/<TweakName>.m
 # %ctor order MUST be: setupCrashHandler → setupWithPath → loadFromPath → tryInstallHooks
 grep -n 'setupCrashHandler\|setupWithPath\|loadFromPath\|tryInstallHooks' <tweak-dir>/Tweak.xm
 grep -n 'setupCrashHandler\|setupWithPath\|loadFromPath\|tryInstallHooks' <tweak-dir>/<TweakName>.m
+
+# object_getIvar MUST be guarded by ivar_getTypeEncoding + type[0] == '@' check (Rule 31)
+grep -c 'ivar_getTypeEncoding' <tweak-dir>/<TweakName>.m
+grep -c "type\[0\] == '@'" <tweak-dir>/<TweakName>.m
+
+# KVC-read objects MUST be type-verified before ivar enumeration (Rule 32)
+# If class_copyIvarList exists, isKindOfClass: MUST also exist
+grep -c 'class_copyIvarList' <tweak-dir>/<TweakName>.m
+grep -c 'isKindOfClass:' <tweak-dir>/<TweakName>.m
 ```
 
 **If HKTweakConfig grep returns 0**: The generation is INCOMPLETE. Add the full HKTweakConfig class from the reference guide template and re-verify. Do not proceed to build.
@@ -430,6 +441,10 @@ grep -n 'setupCrashHandler\|setupWithPath\|loadFromPath\|tryInstallHooks' <tweak
 **If [completion copy] grep returns 0 but method signature has (id) block params**: BLOCK. Rule 1 — `id`-typed block params MUST be copied to heap. Add `[completion copy]` before wrapping.
 
 **If %ctor order is wrong**: Reorder the constructor to follow crash→logger→config→hooks. Any deviation from this order is a blocker.
+
+**If object_getIvar exists but ivar_getTypeEncoding or `type[0] == '@'` guard is missing**: BLOCK. Rule 31 — `@try/@catch` cannot catch SIGSEGV from non-object ivars. Add the type-encoding guard from the reference guide template.
+
+**If class_copyIvarList exists but isKindOfClass: does not**: BLOCK. Rule 32 — KVC-read objects must be type-verified before ivar enumeration. Add `[obj isKindOfClass:[ExpectedClass class]]` verification on the instance passed to ivar enumeration.
 
 **Common pitfall — Swift classes in ObjC runtime**:
 Swift classes bridged to ObjC use a module prefix: `_TtC<ModuleLength><Module><ClassLength><Class>`. The class-dump output shows the ObjC-facing name. Use that exact name in `%hook`.
