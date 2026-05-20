@@ -754,6 +754,251 @@ Each line is a self-contained JSON object:
 
 ---
 
+## Advanced AFNetworking Hook Patterns
+
+When targeting iOS apps that use AFNetworking for HTTP communication, three key patterns handle the entire network interception flow: the central funnel hook, per-API combined file output, and caller tracking.
+
+### Pattern A: AFURLSessionManager — The TRUE Central Funnel
+
+AFNetworking routes ALL requests through `-[AFURLSessionManager dataTaskWithRequest:uploadProgress:downloadProgress:completionHandler:]` — regardless of which high-level API was called (GET, POST, AFHTTPSessionManager, etc.). This is the single hook point that captures every HTTP call.
+
+**Key insight**: AFNetworking does NOT use `-[NSURLSession dataTaskWithRequest:completionHandler:]` — it uses the delegate pattern (`dataTaskWithRequest:` without completionHandler). The AFURLSessionManager internal method deconstructs the raw `NSURLRequest`, then wraps the completion to receive the parsed response.
+
+```objc
+// Forward declare
+static id (*orig_AFURLSessionManager_dataTaskWithRequest)(id self, SEL _cmd, id request, id uploadProg, id downloadProg, id handler);
+
+// --- Replacement: TRUE CENTRAL FUNNEL for ALL AFNetworking requests ---
+static id repl_AFURLSessionManager_dataTaskWithRequest(id self, SEL _cmd, id request, id uploadProg, id downloadProg, id handler) {
+    BOOL shouldCapture = NO;
+    NSString *reqUrl = nil;
+    NSString *reqMethod = nil;
+    NSDictionary *reqHeaders = nil;
+    NSString *reqBodyStr = nil;
+    NSDictionary *requestSnapshot = nil;
+
+    @try {
+        // Extract raw NSURLRequest properties via runtime selectors
+        id urlObj = ((id (*)(id, SEL))objc_msgSend)(request, NSSelectorFromString(@"URL"));
+        reqUrl = [urlObj isKindOfClass:[NSURL class]] ? [urlObj absoluteString] : [urlObj description];
+
+        if (/* URL filter check */) {
+            shouldCapture = YES;
+            reqMethod = ((id (*)(id, SEL))objc_msgSend)(request, NSSelectorFromString(@"HTTPMethod"));
+            reqHeaders = ((id (*)(id, SEL))objc_msgSend)(request, NSSelectorFromString(@"allHTTPHeaderFields"));
+            NSData *reqBodyData = ((id (*)(id, SEL))objc_msgSend)(request, NSSelectorFromString(@"HTTPBody"));
+            reqBodyStr = reqBodyData ? [[NSString alloc] initWithData:reqBodyData encoding:NSUTF8StringEncoding] : nil;
+
+            // Build request snapshot for later combining with response
+            NSMutableDictionary *req = [NSMutableDictionary dictionary];
+            req[@"url"] = reqUrl ?: @"";
+            req[@"method"] = reqMethod ?: @"POST";
+            if (reqHeaders) req[@"headers"] = reqHeaders;
+            if (reqBodyStr) req[@"body"] = reqBodyStr;
+            if (reqBodyData) req[@"body_length"] = @(reqBodyData.length);
+            requestSnapshot = [req copy];
+        }
+    } @catch (NSException *e) {}
+
+    // Wrap completion handler to capture response
+    id heapHandler = handler ? [handler copy] : nil;
+    id wrappedHandler = nil;
+    if (heapHandler && shouldCapture) {
+        NSDictionary *capturedRequest = requestSnapshot;
+        NSString *capturedUrl = reqUrl;
+
+        wrappedHandler = ^(id response, id responseObject, id error) {
+            @try {
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    @try {
+                        NSMutableDictionary *respDict = [NSMutableDictionary dictionary];
+                        // Extract status code, headers, cookies from NSHTTPURLResponse
+                        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                            respDict[@"status_code"] = @(httpResp.statusCode);
+                            respDict[@"response_headers"] = httpResp.allHeaderFields ?: @{};
+                            // Cookies
+                            NSArray *cookies = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:httpResp.URL];
+                            if (cookies.count > 0) { /* save cookie array */ }
+                        }
+                        // Extract response body from parsed object
+                        if ([responseObject isKindOfClass:[NSDictionary class]]) {
+                            respDict[@"body_parsed"] = responseObject;
+                        }
+                        // Save combined request+response (see Pattern B)
+                    } @catch (NSException *e) {}
+                });
+            } @catch (NSException *e) {}
+
+            if (heapHandler) {
+                ((void (^)(id, id, id))heapHandler)(response, responseObject, error);
+            }
+        };
+    }
+
+    if (orig_AFURLSessionManager_dataTaskWithRequest) {
+        return orig_AFURLSessionManager_dataTaskWithRequest(self, _cmd, request, uploadProg, downloadProg, wrappedHandler ?: heapHandler);
+    }
+    return nil;
+}
+
+// Installation:
+// Class cls = NSClassFromString(@"AFURLSessionManager");
+// swizzleInstanceMethod(cls,
+//     NSSelectorFromString(@"dataTaskWithRequest:uploadProgress:downloadProgress:completionHandler:"),
+//     (IMP)repl_AFURLSessionManager_dataTaskWithRequest,
+//     (IMP *)&orig_AFURLSessionManager_dataTaskWithRequest);
+```
+
+### Pattern B: Per-API Combined Request+Response File Output
+
+Instead of separate `raw_http_request.json` / `raw_http_response.json` files that get overwritten, save each API call as a single self-contained JSON file combining request + response + caller method name. This makes it easy for AI tools and humans to read and replay individual API calls.
+
+**File naming**: `Documents/<TweakName>/Requests/<apiName>_<timestamp_ms>.json`
+
+**API name extraction**: Parse the URL path to get the last meaningful component:
+- `https://api.example.com/v4/account/validateCode?bi=...` → `validateCode`
+
+**Combined JSON format**:
+```json
+{
+  "request": {
+    "url": "https://api.example.com/v4/account/validateCode?bi=...",
+    "method": "POST",
+    "headers": {"Content-Type": "application/x-www-form-urlencoded", "cs": "..."},
+    "body": "..."
+  },
+  "response": {
+    "status_code": 200,
+    "response_headers": {"Content-Type": "application/json", "Set-Cookie": "..."},
+    "cookies": [{"name": "session", "value": "...", "domain": "..."}],
+    "body": "{\"code\":0,\"message\":\"success\"}",
+    "body_parsed": {"code": 0, "message": "success"}
+  },
+  "caller": "SOLoginRequest.getVerifyCodeByArea:phone:type:sliderType:sliderExtJson:onSuccess:onFailure:onFinish:"
+}
+```
+
+**Helper functions**:
+```objc
+// Extract API endpoint name from URL path
+static NSString *extractAPINameFromURL(NSString *url) {
+    if (!url) return @"unknown";
+    NSURL *nsurl = [NSURL URLWithString:url];
+    NSString *lastComponent = [nsurl.path lastPathComponent];
+    if (lastComponent.length > 0 && lastComponent.length < 64) return lastComponent;
+    // Fallback: scan path components backwards
+    for (NSString *c in [nsurl.path pathComponents].reverseObjectEnumerator) {
+        if (c.length > 0 && ![c isEqualToString:@"/"] && c.length < 64) return c;
+    }
+    return @"unknown";
+}
+
+// Save combined request+response to per-API JSON file
+static void saveCombinedRequestResponse(NSString *apiName, NSDictionary *requestDict,
+                                         NSDictionary *responseDict, NSString *caller) {
+    @try {
+        NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *dir = [[docs stringByAppendingPathComponent:TWEAK_NAME] stringByAppendingPathComponent:@"Requests"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+
+        NSMutableDictionary *combined = [NSMutableDictionary dictionary];
+        combined[@"request"] = requestDict ?: @{};
+        combined[@"response"] = responseDict ?: @{};
+        if (caller) combined[@"caller"] = caller;
+
+        long long ms = (long long)([[NSDate date] timeIntervalSince1970] * 1000);
+        NSString *filename = [NSString stringWithFormat:@"%@_%lld.json", apiName ?: @"unknown", ms];
+
+        NSData *json = [NSJSONSerialization dataWithJSONObject:combined
+                          options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+        [json writeToFile:[dir stringByAppendingPathComponent:filename] atomically:YES];
+    } @catch (NSException *e) {}
+}
+```
+
+**Directory creation**: Create the `Requests/` subdirectory in the constructor alongside the main output directory:
+```objc
+NSString *requestsDir = [dir stringByAppendingPathComponent:@"Requests"];
+[fm createDirectoryAtPath:requestsDir withIntermediateDirectories:YES attributes:nil error:nil];
+```
+
+### Pattern C: Caller Method Tracking
+
+Track which upper-level method triggered a network request so the output file records the full call chain. Set a static variable in upper-layer hooks, read it in lower-layer HTTP hooks.
+
+```objc
+// File-level static — set by upper-layer hooks, read by HTTP capture hooks
+static NSString *_lastVerifyCodeCaller = nil;
+
+// In upper-layer hooks (e.g., SOLoginRequest):
+static void repl_SOLoginRequest_getVerifyCode(...) {
+    _lastVerifyCodeCaller = @"SOLoginRequest.getVerifyCodeByArea:phone:type:sliderType:sliderExtJson:onSuccess:onFailure:onFinish:";
+    // ... call original ...
+}
+
+// In lower-layer HTTP hook (e.g., AFURLSessionManager):
+static id repl_AFURLSessionManager_dataTaskWithRequest(...) {
+    // ... capture request ...
+    NSString *capturedCaller = _lastVerifyCodeCaller;
+    // Pass capturedCaller to saveCombinedRequestResponse()
+}
+```
+
+**Why this works**: The upper-layer method call runs on the same thread and completes synchronously (fires the network request) before any other verify-code-related method can overwrite the static variable. The completion handler (where the response is saved) captures the value at request time via block closure.
+
+### Pattern D: NSURLSession Fallback Hooks
+
+For requests that bypass AFNetworking, add fallback hooks at the NSURLSession transport layer:
+
+```objc
+// dataTaskWithRequest: (NO completionHandler — AFNetworking delegate path)
+static id (*orig_NSURLSession_dataTaskWithRequest_noHandler)(id self, SEL _cmd, id request);
+
+static id repl_NSURLSession_dataTaskWithRequest_noHandler(id self, SEL _cmd, id request) {
+    // Extract URL, method, headers, body from NSURLRequest via objc_msgSend
+    // Filter by URL pattern
+    // Save request snapshot (response captured by AFURLSessionManager hook)
+    // Call original
+}
+
+// dataTaskWithRequest:completionHandler: (non-AFNetworking path)
+static id (*orig_NSURLSession_dataTaskWithRequest)(id self, SEL _cmd, id request, id completionHandler);
+
+static id repl_NSURLSession_dataTaskWithRequest(id self, SEL _cmd, id request, id completionHandler) {
+    // Build request snapshot
+    // Wrap completionHandler to capture response
+    // Save combined request+response via saveCombinedRequestResponse()
+    // Call original with wrapped handler
+}
+```
+
+### Pattern E: AFHTTPSessionManager High-Level Fallback
+
+For requests that use AFHTTPSessionManager directly (bypassing AFURLSessionManager):
+
+```objc
+static id (*orig_AFHTTPSessionManager_dataTaskHTTPMethod)(id self, SEL _cmd, id method, id urlString, id params, id headers, id uploadProg, id downloadProg, id success, id failure);
+
+static id repl_AFHTTPSessionManager_dataTaskHTTPMethod(...) {
+    // Wrap success/failure blocks
+    // In wrapped blocks: extract task.originalRequest + task.response via objc_msgSend
+    // Save combined request+response via saveCombinedRequestResponse()
+    // Call original with wrapped blocks
+}
+```
+
+### Decision Tree for Layered HTTP Capture
+
+```
+1. AFURLSessionManager.dataTaskWithRequest:...  ← PRIMARY (catches ALL AFNetworking traffic)
+2. NSURLSession.dataTaskWithRequest:            ← Fallback (AFNetworking delegate path — request only)
+3. NSURLSession.dataTaskWithRequest:completionHandler: ← Fallback (non-AFNetworking traffic)
+4. AFHTTPSessionManager.dataTaskWithHTTPMethod:... ← HIGH-LEVEL fallback (API-specific capture)
+```
+
+Each layer calls `saveCombinedRequestResponse()` with the same format. The user gets one JSON file per API call regardless of which path captured it.
+
 ---
 
 ## System 5: Delayed Class Loading with Retry
